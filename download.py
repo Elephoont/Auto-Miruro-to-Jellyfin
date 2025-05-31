@@ -1,8 +1,11 @@
 from playwright.sync_api import sync_playwright, TimeoutError
+import time
+import json
 import argparse
 import os
 import re
 
+# TODO: Add a check for total number of episodes in the series. Skip episodes not in the range.
 # TODO: Add support for other streaming servers with download links
 # TODO: Make a config file for output directory and any other settings
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
@@ -11,12 +14,16 @@ import re
 UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
 
 # Output directory for downloaded video
-OUTPUT_DIR = os.path.abspath("./output")
+OUTPUT_DIR = os.path.abspath("./output") # Default if not set in config
 OUTPUT_NAME = "episode.mp4"
 SERIES_TITLE = "Unknown Series"
 SEASON_NUMBER = 1
 EPISODE_NUMBER = 0
 EPISODE_NAME = "Unknown Episode"
+MAX_RETRIES = 3
+MAX_EPISODES = 25  # Maximum episodes to download in one run
+DUB = False  # Default to subbed unless specified
+config = {}
 
 def get_kwik_download_page(miruro_url):
     with sync_playwright() as p:
@@ -39,6 +46,8 @@ def get_kwik_download_page(miruro_url):
         # Get basic episode and series information
         global SERIES_TITLE
         SERIES_TITLE = page.query_selector("div.title.anime-title a").inner_text()
+        if DUB:
+            SERIES_TITLE += " (Dubbed)"
 
         global EPISODE_NAME
         EPISODE_NAME = page.query_selector(".title-container .ep-title").inner_text()
@@ -62,6 +71,17 @@ def get_kwik_download_page(miruro_url):
 
         print(f"[+] Series: {SERIES_TITLE} | Season: {SEASON_NUMBER} | Episode: {EPISODE_NAME}")
 
+        # Check if the page is on the correct episode
+        ep_number_element = page.query_selector(".title-container .ep-number")
+        if not ep_number_element:
+            raise ValueError("Could not find episode number on page.")
+        match = re.search(r'\d+', ep_number_element.inner_text().strip())
+        ep_number_element = int(match.group(0))
+        if ep_number_element != int(EPISODE_NUMBER):
+            raise ValueError(f"Current episode ({ep_number_element}) does not match requested episode ({EPISODE_NUMBER}). "
+                             "Please check the URL or specify the episode with --episode or --episodes.")
+
+        # Check if the correct playpack server is selected
         print("[*] Checking if playback server is Kiwi...")
         ensure_kiwi_server_selected(page)
         print("[✓] Kiwi server is selected under Sub section.")
@@ -98,34 +118,35 @@ def get_kwik_download_page(miruro_url):
         raise Exception("Timed out waiting for redirect button.")
 
 def ensure_kiwi_server_selected(page):
-    print("[*] Looking for 'kiwi' server under Sub section...")
+    target_label = "dub" if DUB else "sub"
+    print(f"[*] Looking for 'kiwi' server under {target_label.capitalize()} section...")
 
-    # Find all server rows (sub/dub groups)
     server_groups = page.query_selector_all("div.r1s34uq0 > div")
 
     for group in server_groups:
         try:
-            # Check if this group is labeled as 'Sub'
-            label = group.query_selector("div").inner_text().strip().lower()
-            if "sub" in label:
-                # Found the Sub group, look for buttons inside it
+            label_div = group.query_selector_all("div")[0]
+            label = label_div.inner_text().strip().lower()
+
+            if target_label in label:
                 buttons = group.query_selector_all("button.b1nm6r8")
                 for btn in buttons:
                     text = btn.inner_text().strip().lower()
                     if "kiwi" in text:
                         classes = btn.get_attribute("class")
                         if "active" in classes:
-                            print("[✓] 'kiwi' server already selected under Sub.")
+                            print(f"[✓] 'kiwi' server already selected under {target_label.capitalize()}.")
                         else:
-                            print("[→] Selecting 'kiwi' server under Sub...")
+                            print(f"[→] Selecting 'kiwi' server under {target_label.capitalize()}...")
                             btn.click()
                             page.wait_for_timeout(1500)
                         return
-                raise Exception("Could not find 'kiwi' button in Sub section.")
+                raise Exception(f"Could not find 'kiwi' button in {target_label.capitalize()} section.")
         except Exception as e:
             print(f"[!] Error while checking server group: {e}")
 
-    raise Exception("Sub section with 'kiwi' server not found.")
+    raise Exception(f"{target_label.capitalize()} section with 'kiwi' server not found.")
+
 
 
 def get_kwik_download_link(kwik_f_url):
@@ -243,15 +264,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--episodes",
         type=str,
-        help="Specify a range of episodes to download (e.g. 1-5) Max 25 episodes"
+        help=f"Specify a range of episodes to download (e.g. 1-5) Max {MAX_EPISODES} episodes"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--dub",
+        action="store_true",
+        help="Use the dubbed version of the episode (if available)"
+    )
+    args = parser.parse_args()
+    if not args.url:
+        parser.error("The url argument is required. Please provide a valid miruro.to episode link.")
+
+    return args
+
+CONFIG_PATH = "config.json"
+
+def load_config(path=CONFIG_PATH):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Config file not found at {path}")
+    with open(path, "r") as file:
+        return json.load(file)
 
 def main() -> None:
-    args = parse_args()
+    global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB
+    config = load_config()
+    MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
 
-    Miruro_URL = args.url
-    global EPISODE_NUMBER
+    args = parse_args()
+    Miruro_URL = args.url    
+    DUB = args.dub
+    
+    OUTPUT_DIR = os.path.abspath(config.get("outputDir", OUTPUT_DIR))
 
     if args.episode:
         EPISODE_NUMBER = args.episode
@@ -261,6 +304,12 @@ def main() -> None:
         if len(EPISODE_RANGE) != 2 or not all(x.isdigit() for x in EPISODE_RANGE):
             raise ValueError("Invalid episode range format. Use 'start-end' (e.g. 1-5).")
         EPISODE_RANGE = (int(EPISODE_RANGE[0]), int(EPISODE_RANGE[1]))
+        if EPISODE_RANGE[0] <= 0 or EPISODE_RANGE[1] <= 0:
+            raise ValueError("Episode numbers must be positive integers.")
+        if EPISODE_RANGE[0] > EPISODE_RANGE[1]:
+            raise ValueError("Start episode must be less than or equal to end episode.")
+        if EPISODE_RANGE[1] - EPISODE_RANGE[0] + 1 > MAX_EPISODES:
+            raise ValueError(f"Cannot download more than {MAX_EPISODES} episodes at once.")
     else:
         # Ensure the URL contains &ep=NUM at the end
         if Miruro_URL.rsplit("&ep=", 1)[-1].isdigit():
@@ -274,21 +323,30 @@ def main() -> None:
                              "Please specify with --episode or --episodes.")
     
     for episode in range(EPISODE_RANGE[0], EPISODE_RANGE[1]+1):
-        try:
-            Miruro_URL =  Miruro_URL.rsplit("&ep=", 1)[0]
-            Miruro_URL = f"{Miruro_URL}&ep={episode}"
-            print(f"Miruro URL: {Miruro_URL}")
-            print(f"Downloading episode {episode} of {EPISODE_RANGE[1]}")
-            kwik_f_url = get_kwik_download_page(Miruro_URL)
-            get_kwik_download_link(kwik_f_url)
-            saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
-            print(f"\n✅ Done! File saved to: {saved}\n")
-        except KeyboardInterrupt:
-            print("\n[!] Cancelled by user.")
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"\n✖ Error: {exc}\n")
-            if args.debug:
-                raise
+        for i in range(MAX_RETRIES):
+            try:
+                Miruro_URL =  Miruro_URL.rsplit("&ep=", 1)[0]
+                Miruro_URL = f"{Miruro_URL}&ep={episode}"
+                print(f"Miruro URL: {Miruro_URL}")
+                print(f"Downloading episode {episode} of {EPISODE_RANGE[1]}")
+                kwik_f_url = get_kwik_download_page(Miruro_URL)
+                get_kwik_download_link(kwik_f_url)
+                saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
+                print(f"\n✅ Done! File saved to: {saved}\n")
+                break  # Exit retry loop on success
+            except KeyboardInterrupt:
+                print("\n[!] Cancelled by user.")
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"\n✖ Error: {exc}\n")
+                if args.debug:
+                    raise
+            if i == MAX_RETRIES - 1:
+                print("Max retries reached. Exiting.")
+                return
+            print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
+            time.sleep(config.get("retryDelay", 5))
+
 
 # def main():
 #     miruro_url = input("Paste your miruro.to episode link: ").strip()
