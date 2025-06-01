@@ -4,10 +4,9 @@ import json
 import argparse
 import os
 import re
+import sys
 
-# TODO: Add a check for total number of episodes in the series. Skip episodes not in the range.
-# TODO: Add support for other streaming servers with download links
-# TODO: Make a config file for output directory and any other settings
+# TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
 
 # Path to unpacked uBlock Origin extension
@@ -23,6 +22,8 @@ EPISODE_NAME = "Unknown Episode"
 MAX_RETRIES = 3
 MAX_EPISODES = 25  # Maximum episodes to download in one run
 DUB = False  # Default to subbed unless specified
+EPISODES_IN_SEASON = 0 # Number of episodes in the selected season for range validation
+EPISODES_AIRED = 0
 config = {}
 
 def get_kwik_download_page(miruro_url):
@@ -44,32 +45,18 @@ def get_kwik_download_page(miruro_url):
         page.wait_for_timeout(5000)  # wait for JavaScript content
 
         # Get basic episode and series information
-        global SERIES_TITLE
-        SERIES_TITLE = page.query_selector("div.title.anime-title a").inner_text()
-        if DUB:
-            SERIES_TITLE += " (Dubbed)"
+        gather_episode_info(page)
 
-        global EPISODE_NAME
-        EPISODE_NAME = page.query_selector(".title-container .ep-title").inner_text()
-
-        match = re.match(r'^(.*?)(?:\s+(Season\s+\d+))?(?:\s+Part\s*\d+|\s+Cour\s*\d+)?$', SERIES_TITLE, re.IGNORECASE)
-        if match:
-            series = match.group(1).strip()
-            season = match.group(2).strip().replace("Season ", "") if match.group(2) else None
-            SERIES_TITLE = series
-            global SEASON_NUMBER
-            SEASON_NUMBER = int(season) if season else 1
-
-        global EPISODE_NUMBER
-        SEASON_NUMBER = f"{SEASON_NUMBER:02}"
-        global EPISODE_NUMBER
-        EPISODE_NUMBER = f"{EPISODE_NUMBER:02}"
-
-        global OUTPUT_NAME
-        FILENAME = f"{SERIES_TITLE} S{SEASON_NUMBER}E{EPISODE_NUMBER}.mp4"
-        OUTPUT_NAME = os.path.join(SERIES_TITLE, f"Season {SEASON_NUMBER}", FILENAME)
-
-        print(f"[+] Series: {SERIES_TITLE} | Season: {SEASON_NUMBER} | Episode: {EPISODE_NAME}")
+        # Check if the requested episode number is valid
+        if int(EPISODE_NUMBER) not in range(1, EPISODES_AIRED + 2):  # +2 because the aired count is sometimes off by 1
+            if int(EPISODE_NUMBER) not in range(1, EPISODES_IN_SEASON + 1):
+                print(f"✖ Error: Episode {int(EPISODE_NUMBER)} is not valid for this season. "
+                    f"Only episodes 1 to {EPISODES_IN_SEASON} are available in this season.")
+                sys.exit(1)
+            else:
+                print(f"✖ Error: Episode {int(EPISODE_NUMBER)} has not aired yet. "
+                    f"Only episodes 1 to {EPISODES_AIRED + 1 if EPISODES_AIRED + 1 <= EPISODES_IN_SEASON else EPISODES_AIRED} have aired.")
+                sys.exit(1)
 
         # Check if the page is on the correct episode
         ep_number_element = page.query_selector(".title-container .ep-number")
@@ -116,6 +103,45 @@ def get_kwik_download_page(miruro_url):
 
         browser.close()
         raise Exception("Timed out waiting for redirect button.")
+
+def gather_episode_info(page):
+    global SERIES_TITLE, EPISODE_NAME, SEASON_NUMBER, EPISODE_NUMBER, OUTPUT_NAME, EPISODES_IN_SEASON, EPISODES_AIRED
+    SERIES_TITLE = page.query_selector("div.title.anime-title a").inner_text()
+    if DUB:
+        SERIES_TITLE += " (Dubbed)"
+
+    if not EPISODES_IN_SEASON:
+        info_blocks = page.query_selector_all("div.t4mg1tz p")
+        for block in info_blocks:
+            text = block.inner_text().strip()
+            if "Episodes" in text:
+                match = re.search(r'(\d+\s*/\s*\d+)', text)
+                if match:
+                    episodes = match.group(1)
+                    break
+        print(f"[+] {episodes} episodes found in the series info block.")
+        if episodes:
+            episodes = episodes.split('/')
+            EPISODES_AIRED = int(episodes[0].strip())
+            EPISODES_IN_SEASON = int(episodes[1].strip())
+
+    EPISODE_NAME = page.query_selector(".title-container .ep-title").inner_text()
+
+    match = re.match(r'^(.*?)(?:\s+(Season\s+\d+))?(?:\s+Part\s*\d+|\s+Cour\s*\d+)?$', SERIES_TITLE, re.IGNORECASE)
+    if match:
+        series = match.group(1).strip()
+        season = match.group(2).strip().replace("Season ", "") if match.group(2) else None
+        SERIES_TITLE = series
+        SEASON_NUMBER = int(season) if season else 1
+
+    SEASON_NUMBER = f"{SEASON_NUMBER:02}"
+    EPISODE_NUMBER = f"{EPISODE_NUMBER:02}"
+
+    FILENAME = f"{SERIES_TITLE} S{SEASON_NUMBER}E{EPISODE_NUMBER}.mp4"
+    OUTPUT_NAME = os.path.join(SERIES_TITLE, f"Season {SEASON_NUMBER}", FILENAME)
+
+    print(f"[+] Series: {SERIES_TITLE} | Season: {SEASON_NUMBER} | Episode: {EPISODE_NAME}")
+
 
 def ensure_kiwi_server_selected(page):
     target_label = "dub" if DUB else "sub"
