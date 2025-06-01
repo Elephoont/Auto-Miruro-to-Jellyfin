@@ -48,13 +48,20 @@ def get_kwik_download_page(miruro_url):
         gather_episode_info(page)
 
         # Check if the requested episode number is valid
-        if int(EPISODE_NUMBER) not in range(1, EPISODES_AIRED + 2):  # +2 because the aired count is sometimes off by 1
-            if int(EPISODE_NUMBER) not in range(1, EPISODES_IN_SEASON + 1):
-                print(f"✖ Error: Episode {int(EPISODE_NUMBER)} is not valid for this season. "
+        match = re.search(r'&ep=(\d+)', miruro_url)
+        if match:
+            requested_episode = int(match.group(1))
+        else:
+            print("[X] Error: Could not determine episode number from URL. "
+                    "Please specify with --episode or --episodes.")
+            sys.exit(1)
+        if requested_episode not in range(1, EPISODES_AIRED + 2):  # +2 because the aired count is sometimes off by 1
+            if requested_episode not in range(1, EPISODES_IN_SEASON + 1):
+                print(f"[X] Error: Episode {requested_episode} is not valid for this season. "
                     f"Only episodes 1 to {EPISODES_IN_SEASON} are available in this season.")
-                sys.exit(1)
+                sys.exit(1) # 1 for invalid episode number
             else:
-                print(f"✖ Error: Episode {int(EPISODE_NUMBER)} has not aired yet. "
+                print(f"[X] Error: Episode {requested_episode} has not aired yet. "
                     f"Only episodes 1 to {EPISODES_AIRED + 1 if EPISODES_AIRED + 1 <= EPISODES_IN_SEASON else EPISODES_AIRED} have aired.")
                 sys.exit(1)
 
@@ -64,14 +71,14 @@ def get_kwik_download_page(miruro_url):
             raise ValueError("Could not find episode number on page.")
         match = re.search(r'\d+', ep_number_element.inner_text().strip())
         ep_number_element = int(match.group(0))
-        if ep_number_element != int(EPISODE_NUMBER):
-            raise ValueError(f"Current episode ({ep_number_element}) does not match requested episode ({EPISODE_NUMBER}). "
+        if ep_number_element != requested_episode:
+            raise ValueError(f"Current episode ({ep_number_element}) does not match requested episode ({requested_episode}). "
                              "Please check the URL or specify the episode with --episode or --episodes.")
 
         # Check if the correct playpack server is selected
         print("[*] Checking if playback server is Kiwi...")
         ensure_kiwi_server_selected(page)
-        print("[✓] Kiwi server is selected under Sub section.")
+        print("[OK] Kiwi server is selected under Sub section.")
 
         print("[*] Waiting for 'Download Episode' button...")
         try:
@@ -94,7 +101,7 @@ def get_kwik_download_page(miruro_url):
                 text = element.inner_text()
                 print(f"[{i+1:02}s] Text: '{text}' | Href: {href}")
                 if href and href.startswith("https://kwik.si/f/"):
-                    print(f"[✓] Found kwik.si URL: {href}")
+                    print(f"[OK] Found kwik.si URL: {href}")
                     browser.close()
                     return href
             else:
@@ -161,9 +168,9 @@ def ensure_kiwi_server_selected(page):
                     if "kiwi" in text:
                         classes = btn.get_attribute("class")
                         if "active" in classes:
-                            print(f"[✓] 'kiwi' server already selected under {target_label.capitalize()}.")
+                            print(f"[OK] 'kiwi' server already selected under {target_label.capitalize()}.")
                         else:
-                            print(f"[→] Selecting 'kiwi' server under {target_label.capitalize()}...")
+                            print(f"[>] Selecting 'kiwi' server under {target_label.capitalize()}...")
                             btn.click()
                             page.wait_for_timeout(1500)
                         return
@@ -200,7 +207,7 @@ def get_kwik_download_link(kwik_f_url):
         # html_snapshot_path = os.path.join(OUTPUT_DIR, "kwik_page_debug.html")
         # with open(html_snapshot_path, "w", encoding="utf-8") as f:
         #     f.write(page.content())
-        # print(f"[📄] Saved HTML snapshot: {html_snapshot_path}")
+        # print(f"[OK] Saved HTML snapshot: {html_snapshot_path}")
 
         # Step 1: Try to close popup overlays (e.g. fake video)
         try:
@@ -227,7 +234,7 @@ def get_kwik_download_link(kwik_f_url):
         form_found = False
         for i in range(15):
             if page.query_selector("form[action^='https://kwik.si/d/']"):
-                print("[✓] Found download form.")
+                print("[OK] Found download form.")
                 form_found = True
                 break
             print(f"[{i+1}s] Still waiting...")
@@ -268,7 +275,7 @@ def get_kwik_download_link(kwik_f_url):
         output_path = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
         download.save_as(output_path)
 
-        print(f"[✅] Download complete: {output_path}")
+        print(f"[OK] Download complete: {output_path}")
         browser.close()
 
 def parse_args() -> argparse.Namespace:
@@ -355,30 +362,24 @@ def main() -> None:
                 Miruro_URL = f"{Miruro_URL}&ep={episode}"
                 print(f"Miruro URL: {Miruro_URL}")
                 print(f"Downloading episode {episode} of {EPISODE_RANGE[1]}")
+                EPISODE_NUMBER = episode
                 kwik_f_url = get_kwik_download_page(Miruro_URL)
                 get_kwik_download_link(kwik_f_url)
                 saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
-                print(f"\n✅ Done! File saved to: {saved}\n")
+                print(f"\n[OK] Done! File saved to: {saved}\n")
                 break  # Exit retry loop on success
             except KeyboardInterrupt:
                 print("\n[!] Cancelled by user.")
-                return
+                exit(3) # 3 for user cancellation
             except Exception as exc:  # pylint: disable=broad-except
-                print(f"\n✖ Error: {exc}\n")
+                print(f"\n[!] Error: {exc}\n")
                 if args.debug:
                     raise
             if i == MAX_RETRIES - 1:
                 print("Max retries reached. Exiting.")
-                return
+                exit(2) # 2 for download failure
             print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
             time.sleep(config.get("retryDelay", 5))
-
-
-# def main():
-#     miruro_url = input("Paste your miruro.to episode link: ").strip()
-#     kwik_f_url = get_kwik_download_page(miruro_url)
-#     get_kwik_download_link(kwik_f_url)
-
 
 if __name__ == "__main__":
     main()
