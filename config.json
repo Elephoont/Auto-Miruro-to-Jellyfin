@@ -2,5 +2,6 @@
     "outputDir": "./output",
     "maxRetries": 3,
     "retryDelay": 1,
-    "maxEpisodes": 25
+    "maxEpisodes": 25,
+    "scanInterval": 10
 }

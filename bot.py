@@ -6,14 +6,14 @@ import shlex
 import asyncio
 import sqlite3
 import re
+import datetime
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
 # TODO: Improve error handling and logging
 # TODO: Add a command to follow a show as it releases (or a flag)
-# TODO: Make the bot responses only visible to the user who invoked the command
-# TODO: Add a notify command that follows and sets notify to true in follows table
+# TODO: Fix time estimate formatting
 
 # Load token from .env
 load_dotenv()
@@ -32,7 +32,7 @@ def load_config(path):
 CONFIG_PATH = "config.json"
 CONFIG = load_config(CONFIG_PATH)
         
-def add_follow(user_id, series_id, notify=False):
+async def add_follow(user_id, series_id, notify=False):
     conn = sqlite3.connect("hue.db")
     cursor = conn.cursor()
     cursor.execute('''
@@ -50,6 +50,17 @@ def add_follow(user_id, series_id, notify=False):
     conn.commit()
     conn.close()
 
+    # Download the first episode if not already downloaded
+    link = f"https://www.miruro.to/watch?id={series_id}&ep=1"
+    full_cmd = ["python", "download.py", link] # No dub support but who cares
+    print(f"Running command: {' '.join(full_cmd)}")  # Debugging line
+    result = await asyncio.create_subprocess_exec(
+        *full_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = await result.communicate()
+
 @bot.tree.command(name="link", description="Get the direct link to the Jellyfin server")
 async def link(interaction: discord.Interaction):
     await interaction.response.defer()  # Defer the response
@@ -57,7 +68,44 @@ async def link(interaction: discord.Interaction):
         f"Direct link to the Jellyfin server: {JELLYFIN_URL}",
     )
 
-@bot.tree.command(name="notify", description="Follow a series to get notified when new episodes are available")
+@bot.tree.command(name="follow", description="Follow a series to automatically download new episodes")
+@app_commands.describe(
+    link="Direct link to the series page",
+    notify="Whether to enable notifications for new episodes (default: true)"
+)
+async def follow(interaction: discord.Interaction, link: str, notify: bool = False):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    # Validate the link format (valid tld are .to, .tv, .online)
+    if not re.match(r'^https?://(www\.)?miruro\.(to|tv|online)/watch\?id=\d+(&ep=\d+)?$', link):
+        await interaction.followup.send(
+            "[X] Invalid link format. Please provide a valid Miruro series link.",
+            ephemeral=True
+        )
+        return
+
+    # Extract series ID from the link
+    SERIES_ID = re.search(r'id=(\d+)', link)
+    if SERIES_ID:
+        SERIES_ID = SERIES_ID.group(1)
+        print(f"[*] Series ID: {SERIES_ID}")
+    else:
+        await interaction.followup.send(
+            "[X] Could not determine series ID from URL. "
+            "Please ensure the URL is correct and contains a valid series ID.",
+            ephemeral=True
+        )
+        return
+
+    # Add or update the follow entry in the database
+    await add_follow(interaction.user.id, SERIES_ID, notify)
+
+    await interaction.followup.send(
+        f"Successfully followed series ID {SERIES_ID}.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="notify", description="Get notified when new episodes air for a series")
 @app_commands.describe(
     link="Direct link to the series page",
     notify="Whether to enable notifications for new episodes (default: true)"
@@ -87,7 +135,7 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
         return
 
     # Add or update the follow entry in the database
-    add_follow(interaction.user.id, SERIES_ID, notify)
+    await add_follow(interaction.user.id, SERIES_ID, notify)
 
     await interaction.followup.send(
         f"Successfully {'enabled' if notify else 'disabled'} notifications for series ID {SERIES_ID}.",
@@ -97,7 +145,7 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
 @bot.tree.command(name="download", description="Download an episode from Miruro.to")
 @app_commands.describe(
     link="Direct link to the episode page",
-    episodes=f"Episode number or range to download (e.g. 1 or 2-5) episodes [MAX {CONFIG.get('MAX_EPISODES', 25)}]",
+    episodes=f"Episode number or range to download (e.g. 1 or 2-5) [MAX {CONFIG.get('MAX_EPISODES', 25)} episodes]",
     dub="Whether to download the dubbed version (default: false)",
     follow="Automatically download new episodes as they release (default: false)"
 )
@@ -161,10 +209,10 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         )
         return
     
-    # Convert the estimated time to minutes
+    # Convert the estimated time to minutes with decimal places
     estimated_time = num_episodes * 30
     if estimated_time > 60:
-        estimated_time = f"{estimated_time // 60} minutes"
+        estimated_time = f"{estimated_time / 60:.1f} minutes"
     else:
         estimated_time = f"{estimated_time} seconds"
     
@@ -207,9 +255,85 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
     except Exception as e:
         await msg.edit(content=f"[X] An unexpected error occurred:\n```{str(e)}```")
 
+async def schedule_episode_checks():
+    while True:
+        try:
+            await check_for_episodes()
+        except Exception as e:
+            print(f"[!] Scheduler error: {e}")
+        await asyncio.sleep((CONFIG.get('scanInterval', 10) * 60))  # wait however many minutes set in config
+
+async def check_for_episodes():
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
+
+    print("[*] Checking for scheduled downloads...")
+
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Select series that are airing and have at least one follower
+    cursor.execute('''
+        SELECT DISTINCT s.miruro_id, s.next_episode, s.title
+        FROM series s
+        JOIN follows f ON s.miruro_id = f.miruro_id
+        WHERE s.is_airing = 1
+          AND (
+              s.download_failed = 1 OR
+              (s.next_episode_time IS NOT NULL AND ? >= datetime(s.next_episode_time))
+          )
+    ''', (now,))
+
+    series_to_download = cursor.fetchall()
+    if not series_to_download:
+        print("[*] No new episodes to download.")
+        conn.close()
+        return
+    
+    for miruro_id, next_episode, title in series_to_download:
+        try:
+            print(f"[>] Attempting download for '{title}' (ID: {miruro_id})...")
+
+            # Add dub flag if needed
+            command = ["python", "download.py", f"https://www.miruro.to/watch?id={miruro_id}&ep={next_episode}"]
+            if "(Dubbed)" in title:
+                command.append("--dub")
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                print(f"[OK] Download successful for '{title}'")
+                cursor.execute('''
+                    UPDATE series SET download_failed = 0, last_checked = CURRENT_TIMESTAMP
+                    WHERE miruro_id = ?
+                ''', (miruro_id,))
+            else:
+                print(f"[X] Download failed for '{title}'. Error:\n{result.stderr}")
+                cursor.execute('''
+                    UPDATE series SET download_failed = 1, last_checked = CURRENT_TIMESTAMP
+                    WHERE miruro_id = ?
+                ''', (miruro_id,))
+
+        except Exception as e:
+            print(f"[!] Exception during download for {miruro_id}: {e}")
+            cursor.execute('''
+                UPDATE series SET download_failed = 1, last_checked = CURRENT_TIMESTAMP
+                WHERE miruro_id = ?
+            ''', (miruro_id,))
+
+    conn.commit()
+    conn.close()
+    print("[*] Scheduler check complete.\n")
+
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
+    # Start the scheduler in the background
+    bot.loop.create_task(schedule_episode_checks())
 
 bot.run(TOKEN)

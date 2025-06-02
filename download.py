@@ -10,10 +10,8 @@ import sqlite3
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
-
-# TODO: Follows table writing (will be done once notify command is implemented) (Only writes from bot.py)
-# TODO: Episodes table writing 
-# TODO: Series table writing
+# TODO: When a series is followed, download all episodes that have aired (within the max episodes limit)
+# TODO: Add a check to see if episode is already downloaded before attempting to download it again
 
 # Path to unpacked uBlock Origin extension
 UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
@@ -176,6 +174,7 @@ def gather_episode_info(page):
 
     # find airing day and time
     NEXT_EPISODE_TIMESTAMP = None
+    NEXT_EPISODE_NUMBER = None
 
     if AIRING:
         airing_div = page.query_selector("div.eb48q8z > p")
@@ -184,14 +183,18 @@ def gather_episode_info(page):
             print(f"[*] Found airing info: {airing_text}")
 
             # Try to match the date string from the text
-            match = re.search(r'will air on (.+?), (\d{4}), (\d{2}:\d{2}) ([A-Z]+)', airing_text)
+            match = re.search(r'Episode (\d+)\s+will air on\s+(\w{3} \w{3} \d{1,2}), (\d{4}), (\d{2}:\d{2}) ([A-Z]+)', airing_text)
             if match:
-                date_str = f"{match.group(1)} {match.group(2)} {match.group(3)}"
+                NEXT_EPISODE_NUMBER = int(match.group(1))
+                date_str = f"{match.group(2)} {match.group(3)} {match.group(4)}"
                 try:
                     NEXT_EPISODE_TIMESTAMP = datetime.strptime(date_str, "%a %b %d %Y %H:%M")
+                    print(f"[*] Next episode number: {NEXT_EPISODE_NUMBER}")
                     print(f"[*] Parsed airing timestamp: {NEXT_EPISODE_TIMESTAMP}")
                 except ValueError as e:
                     print(f"[!] Error parsing date: {e}")
+            else:
+                print("[!] Could not find next episode airing date.")
         else:
             print("[!] Airing info div not found")
 
@@ -205,6 +208,7 @@ def gather_episode_info(page):
             episode_count INTEGER,
             episodes_aired INTEGER,
             next_episode_time TIMESTAMP,
+            next_episode INTEGER,
             last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             is_airing BOOLEAN DEFAULT 0,
             download_failed BOOLEAN DEFAULT 0
@@ -236,9 +240,9 @@ def gather_episode_info(page):
             VALUES (?, ?, ?, ?, 0)
         ''', (SERIES_ID, int(SEASON_NUMBER), int(EPISODE_NUMBER), EPISODE_NAME))
     cursor.execute('''
-        INSERT OR REPLACE INTO series (miruro_id, title, season, episode_count, episodes_aired, next_episode_time, is_airing, last_checked)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, AIRING))
+        INSERT OR REPLACE INTO series (miruro_id, title, season, episode_count, episodes_aired, next_episode_time, next_episode, is_airing, last_checked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, NEXT_EPISODE_NUMBER, AIRING))
     conn.commit()
 
 
@@ -369,6 +373,12 @@ def get_kwik_download_link(kwik_f_url):
 
         print(f"[OK] Download complete: {output_path}")
         browser.close()
+
+        airing = 1  # Default to airing
+        if int(EPISODES_AIRED) == int(EPISODES_IN_SEASON) or int(EPISODE_NUMBER) == int(EPISODES_IN_SEASON):
+            print("[*] This is the last episode of the season. Marking as not airing in the database.")
+            airing = 0
+
         cursor.execute('''
             UPDATE episodes
             SET downloaded = 1
@@ -377,9 +387,10 @@ def get_kwik_download_link(kwik_f_url):
         cursor.execute('''
             UPDATE series
             SET last_checked = CURRENT_TIMESTAMP,
-            download_failed = 0
+                download_failed = 0,
+                is_airing = ?
             WHERE miruro_id = ?
-        ''', (SERIES_ID,))
+        ''', (airing, SERIES_ID))
         conn.commit()
 
 def parse_args() -> argparse.Namespace:
