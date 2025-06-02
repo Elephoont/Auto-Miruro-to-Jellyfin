@@ -3,3 +3,5 @@ chromium_user_data/
 chromium_user_data_kwik/
 tmp-profile/
 .env
+.vscode/
+hue.db

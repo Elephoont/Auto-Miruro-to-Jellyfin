@@ -1,13 +1,19 @@
 from playwright.sync_api import sync_playwright, TimeoutError
+from datetime import datetime, timedelta
 import time
 import json
 import argparse
 import os
 import re
 import sys
+import sqlite3
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
+
+# TODO: Follows table writing (will be done once notify command is implemented) (Only writes from bot.py)
+# TODO: Episodes table writing 
+# TODO: Series table writing
 
 # Path to unpacked uBlock Origin extension
 UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
@@ -16,15 +22,19 @@ UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
 OUTPUT_DIR = os.path.abspath("./output") # Default if not set in config
 OUTPUT_NAME = "episode.mp4"
 SERIES_TITLE = "Unknown Series"
+SERIES_ID = None
 SEASON_NUMBER = 1
 EPISODE_NUMBER = 0
 EPISODE_NAME = "Unknown Episode"
+FOLLOW = False  # Whether to follow the series and download new episodes as they release
 MAX_RETRIES = 3
 MAX_EPISODES = 25  # Maximum episodes to download in one run
 DUB = False  # Default to subbed unless specified
 EPISODES_IN_SEASON = 0 # Number of episodes in the selected season for range validation
 EPISODES_AIRED = 0
 config = {}
+conn = None
+cursor = None
 
 def get_kwik_download_page(miruro_url):
     with sync_playwright() as p:
@@ -54,15 +64,18 @@ def get_kwik_download_page(miruro_url):
         else:
             print("[X] Error: Could not determine episode number from URL. "
                     "Please specify with --episode or --episodes.")
+            conn.close()
             sys.exit(1)
         if requested_episode not in range(1, EPISODES_AIRED + 2):  # +2 because the aired count is sometimes off by 1
             if requested_episode not in range(1, EPISODES_IN_SEASON + 1):
                 print(f"[X] Error: Episode {requested_episode} is not valid for this season. "
                     f"Only episodes 1 to {EPISODES_IN_SEASON} are available in this season.")
+                conn.close()
                 sys.exit(1) # 1 for invalid episode number
             else:
                 print(f"[X] Error: Episode {requested_episode} has not aired yet. "
                     f"Only episodes 1 to {EPISODES_AIRED + 1 if EPISODES_AIRED + 1 <= EPISODES_IN_SEASON else EPISODES_AIRED} have aired.")
+                conn.close()
                 sys.exit(1)
 
         # Check if the page is on the correct episode
@@ -75,7 +88,7 @@ def get_kwik_download_page(miruro_url):
             raise ValueError(f"Current episode ({ep_number_element}) does not match requested episode ({requested_episode}). "
                              "Please check the URL or specify the episode with --episode or --episodes.")
 
-        # Check if the correct playpack server is selected
+        # Check if the correct playback server is selected
         print("[*] Checking if playback server is Kiwi...")
         ensure_kiwi_server_selected(page)
         print("[OK] Kiwi server is selected under Sub section.")
@@ -119,6 +132,7 @@ def gather_episode_info(page):
 
     if not EPISODES_IN_SEASON:
         info_blocks = page.query_selector_all("div.t4mg1tz p")
+        episodes = None
         for block in info_blocks:
             text = block.inner_text().strip()
             if "Episodes" in text:
@@ -143,11 +157,89 @@ def gather_episode_info(page):
 
     SEASON_NUMBER = f"{SEASON_NUMBER:02}"
     EPISODE_NUMBER = f"{EPISODE_NUMBER:02}"
-
-    FILENAME = f"{SERIES_TITLE} S{SEASON_NUMBER}E{EPISODE_NUMBER}.mp4"
-    OUTPUT_NAME = os.path.join(SERIES_TITLE, f"Season {SEASON_NUMBER}", FILENAME)
+ 
+    # Remove characters not allowed in Windows directory names
+    SERIES_TITLE = re.sub(r'[<>:"/\\|?*]', '', SERIES_TITLE)
+    OUTPUT_NAME = os.path.join(SERIES_TITLE, f"Season {SEASON_NUMBER}", f"{SERIES_TITLE} S{SEASON_NUMBER}E{EPISODE_NUMBER}.mp4")
 
     print(f"[+] Series: {SERIES_TITLE} | Season: {SEASON_NUMBER} | Episode: {EPISODE_NAME}")
+
+    # Determine if the series is currently airing
+    AIRING = False  # Default
+
+    status_elements = page.query_selector_all("div.t4mg1tz p")
+    for element in status_elements:
+        text = element.inner_text().strip().lower()
+        if text.startswith("status:"):
+            AIRING = "airing" in text
+            break
+
+    # find airing day and time
+    NEXT_EPISODE_TIMESTAMP = None
+
+    if AIRING:
+        airing_div = page.query_selector("div.eb48q8z > p")
+        if airing_div:
+            airing_text = airing_div.inner_text().strip()
+            print(f"[*] Found airing info: {airing_text}")
+
+            # Try to match the date string from the text
+            match = re.search(r'will air on (.+?), (\d{4}), (\d{2}:\d{2}) ([A-Z]+)', airing_text)
+            if match:
+                date_str = f"{match.group(1)} {match.group(2)} {match.group(3)}"
+                try:
+                    NEXT_EPISODE_TIMESTAMP = datetime.strptime(date_str, "%a %b %d %Y %H:%M")
+                    print(f"[*] Parsed airing timestamp: {NEXT_EPISODE_TIMESTAMP}")
+                except ValueError as e:
+                    print(f"[!] Error parsing date: {e}")
+        else:
+            print("[!] Airing info div not found")
+
+
+    # Create or update the database to track episodes
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS series (
+            miruro_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            episode_count INTEGER,
+            episodes_aired INTEGER,
+            next_episode_time TIMESTAMP,
+            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_airing BOOLEAN DEFAULT 0,
+            download_failed BOOLEAN DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS follows (
+            user_id TEXT NOT NULL,
+            miruro_id TEXT NOT NULL,
+            notify BOOLEAN DEFAULT 0,
+            PRIMARY KEY (user_id, miruro_id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS episodes (
+            miruro_id TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            episode INTEGER NOT NULL,
+            title TEXT,
+            downloaded BOOLEAN DEFAULT 0,
+            PRIMARY KEY (miruro_id, season, episode)
+        )
+    ''')
+    if FOLLOW:
+            return
+
+    cursor.execute('''
+            INSERT OR REPLACE INTO episodes (miruro_id, season, episode, title, downloaded)
+            VALUES (?, ?, ?, ?, 0)
+        ''', (SERIES_ID, int(SEASON_NUMBER), int(EPISODE_NUMBER), EPISODE_NAME))
+    cursor.execute('''
+        INSERT OR REPLACE INTO series (miruro_id, title, season, episode_count, episodes_aired, next_episode_time, is_airing, last_checked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, AIRING))
+    conn.commit()
 
 
 def ensure_kiwi_server_selected(page):
@@ -277,6 +369,18 @@ def get_kwik_download_link(kwik_f_url):
 
         print(f"[OK] Download complete: {output_path}")
         browser.close()
+        cursor.execute('''
+            UPDATE episodes
+            SET downloaded = 1
+            WHERE miruro_id = ? AND season = ? AND episode = ?
+        ''', (SERIES_ID, SEASON_NUMBER, EPISODE_NUMBER))
+        cursor.execute('''
+            UPDATE series
+            SET last_checked = CURRENT_TIMESTAMP,
+            download_failed = 0
+            WHERE miruro_id = ?
+        ''', (SERIES_ID,))
+        conn.commit()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -304,6 +408,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the dubbed version of the episode (if available)"
     )
+    parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="Follow the series and download new episodes as they release"
+    )
     args = parser.parse_args()
     if not args.url:
         parser.error("The url argument is required. Please provide a valid miruro.to episode link.")
@@ -319,9 +428,12 @@ def load_config(path=CONFIG_PATH):
         return json.load(file)
 
 def main() -> None:
-    global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB
+    global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB, FOLLOW, SERIES_ID, conn, cursor
     config = load_config()
     MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
+
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
 
     args = parse_args()
     Miruro_URL = args.url    
@@ -355,14 +467,30 @@ def main() -> None:
             raise ValueError("No episode number found in URL. "
                              "Please specify with --episode or --episodes.")
     
+    SERIES_ID = re.search(r'id=(\d+)', Miruro_URL)
+    if SERIES_ID:
+        SERIES_ID = SERIES_ID.group(1)
+        print(f"[*] Series ID: {SERIES_ID}")
+    else:
+        print("[!] Could not determine series ID from URL. "
+              "Please ensure the URL is correct and contains a valid series ID.")
+        conn.close()
+        sys.exit(1)
+
+    if args.follow:
+        FOLLOW = True
+        print("[*] Following the series for new episodes...")
+    
+    print(f"[*] Downloading episodes {EPISODE_RANGE[0]} to {EPISODE_RANGE[1]}")
+
     for episode in range(EPISODE_RANGE[0], EPISODE_RANGE[1]+1):
         for i in range(MAX_RETRIES):
             try:
+                EPISODE_NUMBER = episode
                 Miruro_URL =  Miruro_URL.rsplit("&ep=", 1)[0]
                 Miruro_URL = f"{Miruro_URL}&ep={episode}"
                 print(f"Miruro URL: {Miruro_URL}")
-                print(f"Downloading episode {episode} of {EPISODE_RANGE[1]}")
-                EPISODE_NUMBER = episode
+                print(f"Downloading episode {episode}")
                 kwik_f_url = get_kwik_download_page(Miruro_URL)
                 get_kwik_download_link(kwik_f_url)
                 saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
@@ -370,14 +498,22 @@ def main() -> None:
                 break  # Exit retry loop on success
             except KeyboardInterrupt:
                 print("\n[!] Cancelled by user.")
-                exit(3) # 3 for user cancellation
+                conn.close()
+                sys.exit(3) # 3 for user cancellation
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"\n[!] Error: {exc}\n")
                 if args.debug:
                     raise
             if i == MAX_RETRIES - 1:
                 print("Max retries reached. Exiting.")
-                exit(2) # 2 for download failure
+                cursor.execute('''
+                    UPDATE series
+                    SET download_failed = 1
+                    WHERE miruro_id = ?
+                ''', (SERIES_ID,))
+                conn.commit()
+                conn.close()
+                sys.exit(2) # 2 for download failure
             print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
             time.sleep(config.get("retryDelay", 5))
 

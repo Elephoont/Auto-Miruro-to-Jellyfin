@@ -4,54 +4,175 @@ import discord
 import json
 import shlex
 import asyncio
+import sqlite3
+import re
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
 # TODO: Improve error handling and logging
-# TODO: Add a command to follow a show as it releases
+# TODO: Add a command to follow a show as it releases (or a flag)
 # TODO: Make the bot responses only visible to the user who invoked the command
+# TODO: Add a notify command that follows and sets notify to true in follows table
 
 # Load token from .env
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+JELLYFIN_URL = os.getenv("JELLYFIN_URL")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CONFIG = {}
-CONFIG_PATH = "config.json"
-
-def load_config(path=CONFIG_PATH):
+def load_config(path):
         if not os.path.exists(path):
             raise FileNotFoundError(f"Config file not found at {path}")
         with open(path, "r") as file:
             return json.load(file)
+
+CONFIG_PATH = "config.json"
+CONFIG = load_config(CONFIG_PATH)
         
+def add_follow(user_id, series_id, notify=False):
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS follows (
+            user_id TEXT NOT NULL,
+            miruro_id TEXT NOT NULL,
+            notify BOOLEAN DEFAULT 0,
+            PRIMARY KEY (user_id, miruro_id)
+        )
+    ''')
+    cursor.execute('''
+        INSERT OR REPLACE INTO follows (user_id, miruro_id, notify)
+        VALUES (?, ?, ?)
+    ''', (user_id, series_id, notify))
+    conn.commit()
+    conn.close()
+
+@bot.tree.command(name="link", description="Get the direct link to the Jellyfin server")
+async def link(interaction: discord.Interaction):
+    await interaction.response.defer()  # Defer the response
+    await interaction.followup.send(
+        f"Direct link to the Jellyfin server: {JELLYFIN_URL}",
+    )
+
+@bot.tree.command(name="notify", description="Follow a series to get notified when new episodes are available")
+@app_commands.describe(
+    link="Direct link to the series page",
+    notify="Whether to enable notifications for new episodes (default: true)"
+)
+async def notify(interaction: discord.Interaction, link: str, notify: bool = True):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    # Validate the link format (valid tld are .to, .tv, .online)
+    if not re.match(r'^https?://(www\.)?miruro\.(to|tv|online)/watch\?id=\d+(&ep=\d+)?$', link):
+        await interaction.followup.send(
+            "[X] Invalid link format. Please provide a valid Miruro series link.",
+            ephemeral=True
+        )
+        return
+
+    # Extract series ID from the link
+    SERIES_ID = re.search(r'id=(\d+)', link)
+    if SERIES_ID:
+        SERIES_ID = SERIES_ID.group(1)
+        print(f"[*] Series ID: {SERIES_ID}")
+    else:
+        await interaction.followup.send(
+            "[X] Could not determine series ID from URL. "
+            "Please ensure the URL is correct and contains a valid series ID.",
+            ephemeral=True
+        )
+        return
+
+    # Add or update the follow entry in the database
+    add_follow(interaction.user.id, SERIES_ID, notify)
+
+    await interaction.followup.send(
+        f"Successfully {'enabled' if notify else 'disabled'} notifications for series ID {SERIES_ID}.",
+        ephemeral=True
+    )
+
 @bot.tree.command(name="download", description="Download an episode from Miruro.to")
 @app_commands.describe(
     link="Direct link to the episode page",
-    episodes=f"Episode number or range to download (e.g. 1 or 2-5) MAX {CONFIG.get('MAX_EPISODES', 25)} episodes",
-    dub="Whether to download the dubbed version (default: false)"
+    episodes=f"Episode number or range to download (e.g. 1 or 2-5) episodes [MAX {CONFIG.get('MAX_EPISODES', 25)}]",
+    dub="Whether to download the dubbed version (default: false)",
+    follow="Automatically download new episodes as they release (default: false)"
 )
+async def download(interaction: discord.Interaction, link: str, episodes: str = "0", dub: bool = False, follow: bool = False):
+    await interaction.response.defer(thinking=True, ephemeral=True)
 
-async def download(interaction: discord.Interaction, link: str, episodes: str, dub: bool = False):
-    await interaction.response.defer(thinking=True)
+    # Validate the link format (valid tld are .to, .tv, .online)
+    if not re.match(r'^https?://(www\.)?miruro\.(to|tv|online)/watch\?id=\d+(&ep=\d+)?$', link):
+        await interaction.followup.send(
+            "[X] Invalid link format. Please provide a valid Miruro series link.",
+            ephemeral=True
+        )
+        return
 
     # Determine whether a single episode or a range is specified
     if '-' in episodes:
         args = f"--episodes {episodes}"
+        if not episodes.split('-')[0].isdigit() or not episodes.split('-')[1].isdigit():
+            await interaction.followup.send(
+                "[X] Invalid episode range specified. Please use a valid range like 1-5.",
+                ephemeral=True
+            )
+            return
+        if int(episodes.split('-')[1]) < int(episodes.split('-')[0]):
+            await interaction.followup.send(
+                "[X] Invalid episode range specified. The end of the range must be greater than or equal to the start.",
+                ephemeral=True
+            )
+            return
         num_episodes = int(episodes.split('-')[1]) - int(episodes.split('-')[0]) + 1
     else:
         args = f"--episode {episodes}"
         num_episodes = 1
     if dub:
         args += " --dub"
+    
+   
 
-    # Tell the user that the download is starting
+    if follow:
+        args += " --follow"
+
+        SERIES_ID = re.search(r'id=(\d+)', link)
+        if SERIES_ID:
+            SERIES_ID = SERIES_ID.group(1)
+            print(f"[*] Series ID: {SERIES_ID}")
+        else:
+            await interaction.followup.send(
+                "[X] Could not determine series ID from URL. "
+                "Please ensure the URL is correct and contains a valid series ID.",
+                ephemeral=True
+            )
+            return
+
+        # Add or update the follow entry in the database
+        add_follow(interaction.user.id, SERIES_ID, notify=False)
+
+    if num_episodes > CONFIG.get("MAX_EPISODES", 25):
+        await interaction.followup.send(
+            f"[X] You can only download up to {CONFIG['MAX_EPISODES']} episodes at a time.",
+            ephemeral=True
+        )
+        return
+    
+    # Convert the estimated time to minutes
+    estimated_time = num_episodes * 30
+    if estimated_time > 60:
+        estimated_time = f"{estimated_time // 60} minutes"
+    else:
+        estimated_time = f"{estimated_time} seconds"
+    
+    # # Tell the user that the download is starting
     msg = await interaction.followup.send(
-        f"Starting download: estimated time is ~{30 * num_episodes} seconds...",
-        wait=True
+        f"Starting download: estimated time is ~{estimated_time}",
+        wait=True,
+        ephemeral=True
     )
 
     try:
@@ -88,9 +209,6 @@ async def download(interaction: discord.Interaction, link: str, episodes: str, d
 
 @bot.event
 async def on_ready():
-    # Load configuration
-    global CONFIG
-    CONFIG = load_config()
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
 
