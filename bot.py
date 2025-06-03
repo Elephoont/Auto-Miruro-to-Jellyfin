@@ -30,6 +30,16 @@ def load_config(path):
 CONFIG_PATH = "config.json"
 CONFIG = load_config(CONFIG_PATH)
 
+async def command_allowed(interaction: discord.Interaction):
+    allowed_servers = CONFIG.get("allowedServers", None)
+    if allowed_servers and interaction.guild.id not in allowed_servers:
+        await interaction.response.send_message(
+            "This bot is disabled in this server.",
+            ephemeral=True
+        )
+        return False
+    return True
+
 async def create_tables(conn, cursor=None):
     if not cursor:
         cursor = conn.cursor()
@@ -180,6 +190,9 @@ async def parse_download_response(result, output, error):
 
 @bot.tree.command(name="link", description="Get the direct link to the Jellyfin server")
 async def link(interaction: discord.Interaction):
+    if not await command_allowed(interaction):
+        return
+
     await interaction.response.defer()  # Defer the response
     await interaction.followup.send(
         f"Direct link to the Jellyfin server: {JELLYFIN_URL}",
@@ -192,6 +205,9 @@ async def link(interaction: discord.Interaction):
     dub="Whether to follow the dubbed version of the series (default: false)"
 )
 async def follow(interaction: discord.Interaction, link: str, notify: bool = False, dub: bool = False):
+    if not await command_allowed(interaction):
+        return
+    
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Validate the link format (valid tld are .to, .tv, .online)
@@ -246,6 +262,9 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
     dub="Whether to follow the dubbed version of the series (default: false)"
 )
 async def notify(interaction: discord.Interaction, link: str, notify: bool = True, dub: bool = False):
+    if not await command_allowed(interaction):
+        return
+    
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Validate the link format (valid tld are .to, .tv, .online)
@@ -298,6 +317,9 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
     follow="Automatically download new episodes as they release (default: false)"
 )
 async def download(interaction: discord.Interaction, link: str, episodes: str = "0", dub: bool = False, follow: bool = False):
+    if not await command_allowed(interaction):
+        return
+
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Validate the link format (valid tld are .to, .tv, .online)

@@ -4,5 +4,10 @@
     "retryDelay": 1,
     "maxEpisodes": 30,
     "scanInterval": 10,
-    "banNSFW": true
+    "banNSFW": true,
+    "allowedServers": [
+        522262948605984769,
+        991929818113396766,
+        454837876799176714
+    ]
 }
