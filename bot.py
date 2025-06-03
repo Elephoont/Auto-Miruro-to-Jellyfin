@@ -415,7 +415,7 @@ async def notify_users(miruro_id, title, new_episode, conn, cursor):
             if user_obj:
                 await user_obj.send(
                     f"New episode available for **{title}**: Episode {new_episode} is now available! "
-                    f"Check it out at {JELLYFIN_URL} or on the Swiftfin/Jellyfin app."
+                    f"\nCheck it out at {JELLYFIN_URL} or on the Swiftfin/Jellyfin app."
                 )
                 print(f"[+] Notified {user_obj.name} about new episode of {title}.")
         except discord.Forbidden:
@@ -474,7 +474,7 @@ async def check_for_episodes():
                 ''', (miruro_id,))
 
                 # Notify users who follow this series
-                notify_users(miruro_id, title, next_episode, conn, cursor)
+                await notify_users(miruro_id, title, next_episode, conn, cursor)
             else:
                 print(f"[X] Download failed for '{title}'. Error:\n{result.stderr}")
                 cursor.execute('''
