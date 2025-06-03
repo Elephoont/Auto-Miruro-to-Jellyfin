@@ -12,8 +12,6 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 # TODO: Improve error handling and logging
-# TODO: Add a command to follow a show as it releases (or a flag)
-# TODO: Fix time estimate formatting
 
 # Load token from .env
 load_dotenv()
@@ -31,10 +29,25 @@ def load_config(path):
 
 CONFIG_PATH = "config.json"
 CONFIG = load_config(CONFIG_PATH)
-        
-async def add_follow(user_id, series_id, notify=False):
-    conn = sqlite3.connect("hue.db")
-    cursor = conn.cursor()
+
+async def create_tables(conn, cursor=None):
+    if not cursor:
+        cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS series (
+            miruro_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            episode_count INTEGER,
+            episodes_aired INTEGER,
+            next_episode_time TIMESTAMP,
+            next_episode INTEGER,
+            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_airing BOOLEAN DEFAULT 0,
+            download_failed BOOLEAN DEFAULT 0
+        )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS follows (
             user_id TEXT NOT NULL,
@@ -44,22 +57,126 @@ async def add_follow(user_id, series_id, notify=False):
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS episodes (
+            miruro_id TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            episode INTEGER NOT NULL,
+            title TEXT,
+            downloaded BOOLEAN DEFAULT 0,
+            PRIMARY KEY (miruro_id, season, episode)
+        )
+    ''')
+    conn.commit()
+
+async def add_follow(msg, user_id, series_id, notify=False, dub=False, download_all=True):
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
+    await create_tables(conn, cursor)
+    cursor.execute('''
         INSERT OR REPLACE INTO follows (user_id, miruro_id, notify)
         VALUES (?, ?, ?)
     ''', (user_id, series_id, notify))
     conn.commit()
-    conn.close()
 
-    # Download the first episode if not already downloaded
-    link = f"https://www.miruro.to/watch?id={series_id}&ep=1"
-    full_cmd = ["python", "download.py", link] # No dub support but who cares
-    print(f"Running command: {' '.join(full_cmd)}")  # Debugging line
-    result = await asyncio.create_subprocess_exec(
-        *full_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    stdout, stderr = await result.communicate()
+    # Gather series info if not already done
+    cursor.execute('SELECT * FROM series WHERE miruro_id = ?', (series_id,))
+    series_info = cursor.fetchone()
+    if not series_info:
+        try:
+            link = f"https://www.miruro.to/watch?id={series_id}&ep=1"
+            full_cmd = ["python", "download.py", link, "--follow"] # No dub support but who cares
+            print(f"Running command: {' '.join(full_cmd)}")  # Debugging line
+            result = await asyncio.create_subprocess_exec(
+                *full_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            output = stdout.decode().strip() or "No output."
+            error = stderr.decode().strip()
+
+            response = await parse_download_response(result, output, error)
+
+            if response == "<:eyebrowraised:1379311747277787207>":
+                await msg.edit(content=response[:2000])  # Discord message limit
+                conn.close()
+                return "no"
+        except Exception as e:
+            print(f"[!] Error gathering info for series ID {series_id}: {e}")
+            conn.close()
+            return False
+
+    if download_all:
+        # Download the entire season (up to MAX_EPISODES)
+        cursor.execute('''
+            SELECT miruro_id, title, season, episode_count, episodes_aired, next_episode_time, next_episode, is_airing
+            FROM series WHERE miruro_id = ?
+        ''', (series_id,))
+        series_info = cursor.fetchone()
+        if not series_info:
+            print(f"[!] Series ID {series_id} not found in database after info gathering.")
+            conn.close()
+            return False
+        miruro_id, title, season, episode_count, episodes_aired, next_episode_time, next_episode, is_airing = series_info
+        print(f"[+] Attempting to download all of {title} Season {season} (ID: {miruro_id})")
+        if episode_count is None:
+            print(f"[!] Episode count for series ID {series_id} is not set. Cannot proceed with download.")
+            conn.close()
+            return False
+        
+        episode_range = f"1-{episodes_aired + 1}" if episodes_aired < episode_count else f"1-{episode_count}"
+
+        if episode_count > CONFIG.get("MAX_EPISODES", 25):
+            episode_range = f"{(episodes_aired + 1) - CONFIG.get('MAX_EPISODES', 30) + 1}-{episodes_aired + 1}"
+            print(f"[!] Episode count for series '{title} Season {season}' exceeds maximum episode count. "
+                f"Downloading only {CONFIG.get('MAX_EPISODES', 30)} most recent episodes. ")
+            
+        args = f"--episodes {episode_range}"
+        if dub:
+            args += " --dub"
+        try:
+            full_cmd = ["python", "download.py", f"https://www.miruro.to/watch?id={series_id}&ep=1"] + shlex.split(args)
+            print(f"Running command: {' '.join(full_cmd)}")  # Debugging line
+            result = await asyncio.create_subprocess_exec(
+                *full_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+            if result.returncode != 0:
+                print(f"[!] Download failed for series ID {series_id}: {stderr.decode().strip()}")
+                conn.close()
+                return False
+            print(f"[+] Download completed for series ID {series_id}: {stdout.decode().strip()}")
+        except Exception as e:
+            print(f"[!] Exception during download for series ID {series_id}: {e}")
+            conn.close()
+            return False
+
+
+    conn.close()
+    return True
+
+async def parse_download_response(result, output, error):
+    if result.returncode != 0:
+        # 1 indicates invalid episode number, 2 indicates download error, 3 cancelled server side
+        if result.returncode == 1:
+            error_msg = "[X] Invalid episode number specified."
+        elif result.returncode == 2:
+            error_msg = "[X] Download error occurred. Please check the link and try again."
+        elif result.returncode == 3:
+            error_msg = "[X] Download cancelled by the server."
+        elif result.returncode == 69:
+            error_msg = "<:eyebrowraised:1379311747277787207>"
+        else:
+            error_msg = f"[X] Script exited with code {result.returncode}."
+        response = f"{error_msg}"
+        #response = f"{error_msg}\n```{error or output}```"
+    else:
+        response = f"[+] Download(s) completed successfully."
+        # response = f"Download(s) completed successfully.\n```{output}```"
+    return response
 
 @bot.tree.command(name="link", description="Get the direct link to the Jellyfin server")
 async def link(interaction: discord.Interaction):
@@ -71,9 +188,10 @@ async def link(interaction: discord.Interaction):
 @bot.tree.command(name="follow", description="Follow a series to automatically download new episodes")
 @app_commands.describe(
     link="Direct link to the series page",
-    notify="Whether to enable notifications for new episodes (default: true)"
+    notify="Whether to enable notifications for new episodes (default: true)",
+    dub="Whether to follow the dubbed version of the series (default: false)"
 )
-async def follow(interaction: discord.Interaction, link: str, notify: bool = False):
+async def follow(interaction: discord.Interaction, link: str, notify: bool = False, dub: bool = False):
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Validate the link format (valid tld are .to, .tv, .online)
@@ -97,8 +215,24 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
         )
         return
 
+    # Tell user that it is attempting to download all episodes
+    msg = await interaction.followup.send(
+        f"Attempting to follow series ID {SERIES_ID} and download all episodes. "
+        "This may take a while depending on the number of episodes.",
+        ephemeral=True
+    )
+
     # Add or update the follow entry in the database
-    await add_follow(interaction.user.id, SERIES_ID, notify)
+    followed = await add_follow(msg, interaction.user.id, SERIES_ID, notify, dub)
+    if not followed :
+        await msg.edit(content="[X] Failed to gather series information. Please check the link and try again.")
+        return
+    
+    if followed == "no":
+        return
+
+    # Tell user that the series was successfully followed
+    msg.edit(content=f"Successfully followed and downloaded series ID {SERIES_ID}. ")
 
     await interaction.followup.send(
         f"Successfully followed series ID {SERIES_ID}.",
@@ -108,9 +242,10 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
 @bot.tree.command(name="notify", description="Get notified when new episodes air for a series")
 @app_commands.describe(
     link="Direct link to the series page",
-    notify="Whether to enable notifications for new episodes (default: true)"
+    notify="Whether to enable notifications for new episodes (default: true)",
+    dub="Whether to follow the dubbed version of the series (default: false)"
 )
-async def notify(interaction: discord.Interaction, link: str, notify: bool = True):
+async def notify(interaction: discord.Interaction, link: str, notify: bool = True, dub: bool = False):
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Validate the link format (valid tld are .to, .tv, .online)
@@ -134,8 +269,21 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
         )
         return
 
+    # Tell user that it is attempting to download all episodes
+    msg = await interaction.followup.send(
+        f"{'Enabl' if notify else 'Disabl'}ing notifications for id:{SERIES_ID}.",
+        ephemeral=True
+    )
+
     # Add or update the follow entry in the database
-    await add_follow(interaction.user.id, SERIES_ID, notify)
+    following = await add_follow(msg, interaction.user.id, SERIES_ID, notify, dub)
+    if not following:
+        await msg.edit(content="[X] Failed to gather series information. Please check the link and try again.")
+        return
+    
+    if following == "no":
+        return
+    
 
     await interaction.followup.send(
         f"Successfully {'enabled' if notify else 'disabled'} notifications for series ID {SERIES_ID}.",
@@ -182,10 +330,8 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
     if dub:
         args += " --dub"
     
-   
-
     if follow:
-        args += " --follow"
+        # args += " --follow"
 
         SERIES_ID = re.search(r'id=(\d+)', link)
         if SERIES_ID:
@@ -200,7 +346,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
             return
 
         # Add or update the follow entry in the database
-        add_follow(interaction.user.id, SERIES_ID, notify=False)
+        add_follow(interaction.user.id, SERIES_ID, notify=False, dub=dub, download_all=False)
 
     if num_episodes > CONFIG.get("MAX_EPISODES", 25):
         await interaction.followup.send(
@@ -218,7 +364,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
     
     # # Tell the user that the download is starting
     msg = await interaction.followup.send(
-        f"Starting download: estimated time is ~{estimated_time}",
+        f"Added download to queue: estimated minimum time is ~{estimated_time}",
         wait=True,
         ephemeral=True
     )
@@ -237,22 +383,12 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         output = stdout.decode().strip() or "No output."
         error = stderr.decode().strip()
         
-        if result.returncode != 0:
-            # 1 indicates invalid episode number, 2 indicates download error, 3 cancelled server side
-            if result.returncode == 1:
-                error_msg = "[X] Invalid episode number specified."
-            elif result.returncode == 2:
-                error_msg = "[X] Download error occurred. Please check the link and try again."
-            elif result.returncode == 3:
-                error_msg = "[X] Download cancelled by the server."
-            else:
-                error_msg = f"[X] Script exited with code {result.returncode}.\n```{error or output}```"
-            response = f"{error_msg}\n```{error or output}```"
-        else:
-            response = f"Script completed.\n```{output}```"
+        response = await parse_download_response(result, output, error)
 
+        print(f"[>] Download result: {response}")
         await msg.edit(content=response[:2000])  # Discord message limit
     except Exception as e:
+        print(f"[!] Exception during download: {e}")
         await msg.edit(content=f"[X] An unexpected error occurred:\n```{str(e)}```")
 
 async def schedule_episode_checks():
@@ -262,6 +398,32 @@ async def schedule_episode_checks():
         except Exception as e:
             print(f"[!] Scheduler error: {e}")
         await asyncio.sleep((CONFIG.get('scanInterval', 10) * 60))  # wait however many minutes set in config
+
+async def notify_users(miruro_id, title, new_episode, conn, cursor):
+    cursor.execute('''
+        SELECT user_id FROM follows WHERE miruro_id = ? AND notify = 1
+    ''', (miruro_id,))
+    users = cursor.fetchall()
+    if not users:
+        print(f"[*] No users to notify for series ID {miruro_id}.")
+        return
+    
+    for user in users:
+        user_id = user[0]
+        try:
+            user_obj = await bot.fetch_user(user_id)
+            if user_obj:
+                await user_obj.send(
+                    f"New episode available for **{title}**: Episode {new_episode} is now available! "
+                    f"Check it out at {JELLYFIN_URL} or on the Swiftfin/Jellyfin app."
+                )
+                print(f"[+] Notified {user_obj.name} about new episode of {title}.")
+        except discord.Forbidden:
+            print(f"[!] Could not notify {user_id}: User has DMs disabled.")
+        except Exception as e:
+            print(f"[!] Error notifying {user_id}: {e}")
+
+    return
 
 async def check_for_episodes():
     conn = sqlite3.connect("hue.db")
@@ -291,7 +453,7 @@ async def check_for_episodes():
     
     for miruro_id, next_episode, title in series_to_download:
         try:
-            print(f"[>] Attempting download for '{title}' (ID: {miruro_id})...")
+            print(f"[>] Attempting download for '{title} ep {next_episode}' (ID: {miruro_id})...")
 
             # Add dub flag if needed
             command = ["python", "download.py", f"https://www.miruro.to/watch?id={miruro_id}&ep={next_episode}"]
@@ -310,6 +472,9 @@ async def check_for_episodes():
                     UPDATE series SET download_failed = 0, last_checked = CURRENT_TIMESTAMP
                     WHERE miruro_id = ?
                 ''', (miruro_id,))
+
+                # Notify users who follow this series
+                notify_users(miruro_id, title, next_episode, conn, cursor)
             else:
                 print(f"[X] Download failed for '{title}'. Error:\n{result.stderr}")
                 cursor.execute('''

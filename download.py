@@ -7,11 +7,11 @@ import os
 import re
 import sys
 import sqlite3
+import portalocker
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
-# TODO: When a series is followed, download all episodes that have aired (within the max episodes limit)
-# TODO: Add a check to see if episode is already downloaded before attempting to download it again
+# TODO: Raised eyebrow for shows with weird tags
 
 # Path to unpacked uBlock Origin extension
 UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
@@ -30,11 +30,46 @@ MAX_EPISODES = 25  # Maximum episodes to download in one run
 DUB = False  # Default to subbed unless specified
 EPISODES_IN_SEASON = 0 # Number of episodes in the selected season for range validation
 EPISODES_AIRED = 0
+CONFIG_PATH = "config.json"
 config = {}
 conn = None
 cursor = None
+LOCK_FILE = "download.lock"
+
+def acquire_download_lock():
+    lock_file = open(LOCK_FILE, "w")
+    print("[*] Waiting to acquire download lock...")
+    portalocker.lock(lock_file, portalocker.LOCK_EX)  # Will block here until lock is free
+    print("[OK] Lock acquired.")
+    return lock_file
 
 def get_kwik_download_page(miruro_url):
+    # Before opening the browser, check if the episode has already been downloaded
+    cursor.execute('''
+        SELECT downloaded FROM episodes
+        WHERE miruro_id = ? AND episode = ? AND downloaded = 1
+    ''', (SERIES_ID, EPISODE_NUMBER))
+    row = cursor.fetchone()
+    if row and row[0]:
+        cursor.execute('''
+            SELECT title FROM series WHERE miruro_id = ?
+        ''', (SERIES_ID,))
+        series_row = cursor.fetchone()
+        if series_row:
+            SERIES_TITLE = series_row[0]
+        OUTPUT_NAME = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER:02}", f"{SERIES_TITLE} S{SEASON_NUMBER:02}E{EPISODE_NUMBER:02}.mp4")
+        print(f"[*] Checking if filename {OUTPUT_NAME} exists...")
+        if os.path.exists(OUTPUT_NAME): # Need to query DB for series name etc.
+            print(f"[!] Episode {EPISODE_NUMBER} of ID:{SERIES_ID} is already downloaded.")
+            return "skip"
+        print("[*] Database indicates episode is downloaded, but file does not exist. ")
+        cursor.execute('''
+            UPDATE episodes
+            SET downloaded = 0
+            WHERE miruro_id = ? AND episode = ?
+        ''', (SERIES_ID, EPISODE_NUMBER))
+        conn.commit()
+
     with sync_playwright() as p:
         user_data_dir = os.path.abspath("chromium_user_data")
         browser = p.chromium.launch_persistent_context(
@@ -53,9 +88,14 @@ def get_kwik_download_page(miruro_url):
         page.wait_for_timeout(5000)  # wait for JavaScript content
 
         # Get basic episode and series information
-        gather_episode_info(page)
+        gather_episode_info(page, browser)
 
-        # Check if the requested episode number is valid
+        if FOLLOW:
+            print("[*] Following the series. No download will be performed.") # Bot script should next attempt to download the whole season
+            browser.close()
+            return "skip"
+
+        # Check if the requested episode number matches the page
         match = re.search(r'&ep=(\d+)', miruro_url)
         if match:
             requested_episode = int(match.group(1))
@@ -122,11 +162,36 @@ def get_kwik_download_page(miruro_url):
         browser.close()
         raise Exception("Timed out waiting for redirect button.")
 
-def gather_episode_info(page):
+def gather_episode_info(page, browser):
     global SERIES_TITLE, EPISODE_NAME, SEASON_NUMBER, EPISODE_NUMBER, OUTPUT_NAME, EPISODES_IN_SEASON, EPISODES_AIRED
     SERIES_TITLE = page.query_selector("div.title.anime-title a").inner_text()
     if DUB:
         SERIES_TITLE += " (Dubbed)"
+
+    if config.get("banNSFW", True):
+        tags_div = page.query_selector("div.t4mg1tz > div[style*='flex-wrap']")
+        blacklist = {"ECCHI", "HENTAI"}
+        whitelist_titles = {
+            "nogamenolife",
+            "konosuba", 
+            "mushokutensei", 
+            "killlakill", 
+            "mydress-updarling", 
+            "weneverlearn"
+        }
+        normalized_title = SERIES_TITLE.lower().replace(" ", "")
+        is_whitelisted = any(kw in normalized_title for kw in whitelist_titles)
+
+        if tags_div and not is_whitelisted:
+            tag_elements = tags_div.query_selector_all("a")
+            tags = {tag.inner_text().strip().upper() for tag in tag_elements}
+            print(f"[*] Tags found: {tags}")
+
+            if blacklist & tags:
+                print("[X] Blacklisted tag detected. Skipping this series.")
+                browser.close()
+                conn.close()
+                sys.exit(69)
 
     if not EPISODES_IN_SEASON:
         info_blocks = page.query_selector_all("div.t4mg1tz p")
@@ -134,15 +199,14 @@ def gather_episode_info(page):
         for block in info_blocks:
             text = block.inner_text().strip()
             if "Episodes" in text:
-                match = re.search(r'(\d+\s*/\s*\d+)', text)
+                match = re.search(r'Episodes:\s*([\d,]+)(?:\s*/\s*(\d+))?', text) # optionally looks for total episodes
                 if match:
-                    episodes = match.group(1)
+                    episodes = match
                     break
         print(f"[+] {episodes} episodes found in the series info block.")
         if episodes:
-            episodes = episodes.split('/')
-            EPISODES_AIRED = int(episodes[0].strip())
-            EPISODES_IN_SEASON = int(episodes[1].strip())
+            EPISODES_AIRED = int(episodes.group(1).replace(',', ''))
+            EPISODES_IN_SEASON = int(episodes.group(2).replace(',', '')) if episodes.group(2) else EPISODES_AIRED + 2 # Default to aired + 2 if not specified
 
     EPISODE_NAME = page.query_selector(".title-container .ep-title").inner_text()
 
@@ -195,46 +259,17 @@ def gather_episode_info(page):
                     print(f"[!] Error parsing date: {e}")
             else:
                 print("[!] Could not find next episode airing date.")
+                # Fallback to current time + 1 day
+                NEXT_EPISODE_TIMESTAMP = datetime.now() + timedelta(days=1)
         else:
             print("[!] Airing info div not found")
+    else:
+        print("[*] Series is not currently airing. Setting next episode to None.")
+        EPISODES_IN_SEASON = EPISODES_AIRED  # If not airing, assume all episodes have aired
+        NEXT_EPISODE_TIMESTAMP = None
+        NEXT_EPISODE_NUMBER = None
 
-
-    # Create or update the database to track episodes
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS series (
-            miruro_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            season INTEGER NOT NULL,
-            episode_count INTEGER,
-            episodes_aired INTEGER,
-            next_episode_time TIMESTAMP,
-            next_episode INTEGER,
-            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_airing BOOLEAN DEFAULT 0,
-            download_failed BOOLEAN DEFAULT 0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS follows (
-            user_id TEXT NOT NULL,
-            miruro_id TEXT NOT NULL,
-            notify BOOLEAN DEFAULT 0,
-            PRIMARY KEY (user_id, miruro_id)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS episodes (
-            miruro_id TEXT NOT NULL,
-            season INTEGER NOT NULL,
-            episode INTEGER NOT NULL,
-            title TEXT,
-            downloaded BOOLEAN DEFAULT 0,
-            PRIMARY KEY (miruro_id, season, episode)
-        )
-    ''')
-    if FOLLOW:
-            return
-
+    # Update the database to track episodes
     cursor.execute('''
             INSERT OR REPLACE INTO episodes (miruro_id, season, episode, title, downloaded)
             VALUES (?, ?, ?, ?, 0)
@@ -244,7 +279,6 @@ def gather_episode_info(page):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, NEXT_EPISODE_NUMBER, AIRING))
     conn.commit()
-
 
 def ensure_kiwi_server_selected(page):
     target_label = "dub" if DUB else "sub"
@@ -276,11 +310,12 @@ def ensure_kiwi_server_selected(page):
 
     raise Exception(f"{target_label.capitalize()} section with 'kiwi' server not found.")
 
-
-
 def get_kwik_download_link(kwik_f_url):
     from playwright.sync_api import sync_playwright
     import os
+
+    if kwik_f_url == "skip":
+        return
 
     print("[*] Opening kwik.si page with Playwright...")
 
@@ -393,6 +428,40 @@ def get_kwik_download_link(kwik_f_url):
         ''', (airing, SERIES_ID))
         conn.commit()
 
+def create_tables():
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS series (
+            miruro_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            episode_count INTEGER,
+            episodes_aired INTEGER,
+            next_episode_time TIMESTAMP,
+            next_episode INTEGER,
+            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_airing BOOLEAN DEFAULT 0,
+            download_failed BOOLEAN DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS follows (
+            user_id TEXT NOT NULL,
+            miruro_id TEXT NOT NULL,
+            notify BOOLEAN DEFAULT 0,
+            PRIMARY KEY (user_id, miruro_id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS episodes (
+            miruro_id TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            episode INTEGER NOT NULL,
+            title TEXT,
+            downloaded BOOLEAN DEFAULT 0,
+            PRIMARY KEY (miruro_id, season, episode)
+        )
+    ''')
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download a miruro.to episode through pahe.win ➜ kwik.si "
@@ -430,8 +499,6 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-CONFIG_PATH = "config.json"
-
 def load_config(path=CONFIG_PATH):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config file not found at {path}")
@@ -439,94 +506,101 @@ def load_config(path=CONFIG_PATH):
         return json.load(file)
 
 def main() -> None:
-    global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB, FOLLOW, SERIES_ID, conn, cursor
-    config = load_config()
-    MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
+    lock_file = acquire_download_lock()
+    try:
+        global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB, FOLLOW, SERIES_ID, conn, cursor
+        config = load_config()
+        MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
 
-    conn = sqlite3.connect("hue.db")
-    cursor = conn.cursor()
+        conn = sqlite3.connect("hue.db")
+        cursor = conn.cursor()
+        create_tables()
 
-    args = parse_args()
-    Miruro_URL = args.url    
-    DUB = args.dub
-    
-    OUTPUT_DIR = os.path.abspath(config.get("outputDir", OUTPUT_DIR))
+        args = parse_args()
+        Miruro_URL = args.url    
+        DUB = args.dub
+        
+        OUTPUT_DIR = os.path.abspath(config.get("outputDir", OUTPUT_DIR))
 
-    if args.episode:
-        EPISODE_NUMBER = args.episode
-        EPISODE_RANGE = (EPISODE_NUMBER, EPISODE_NUMBER)
-    elif args.episodes and '-' in args.episodes:
-        EPISODE_RANGE = args.episodes.split('-')
-        if len(EPISODE_RANGE) != 2 or not all(x.isdigit() for x in EPISODE_RANGE):
-            raise ValueError("Invalid episode range format. Use 'start-end' (e.g. 1-5).")
-        EPISODE_RANGE = (int(EPISODE_RANGE[0]), int(EPISODE_RANGE[1]))
-        if EPISODE_RANGE[0] <= 0 or EPISODE_RANGE[1] <= 0:
-            raise ValueError("Episode numbers must be positive integers.")
-        if EPISODE_RANGE[0] > EPISODE_RANGE[1]:
-            raise ValueError("Start episode must be less than or equal to end episode.")
-        if EPISODE_RANGE[1] - EPISODE_RANGE[0] + 1 > MAX_EPISODES:
-            raise ValueError(f"Cannot download more than {MAX_EPISODES} episodes at once.")
-    else:
-        # Ensure the URL contains &ep=NUM at the end
-        if Miruro_URL.rsplit("&ep=", 1)[-1].isdigit():
-            EPISODE_NUMBER = int(re.sub("[^0-9]", "", args.url[-4:]))
-            if EPISODE_NUMBER <= 0:
-                raise ValueError("Could not determine episode number from URL. "
-                                "Please specify with --episode or --episodes.")
+        if args.episode:
+            EPISODE_NUMBER = args.episode
             EPISODE_RANGE = (EPISODE_NUMBER, EPISODE_NUMBER)
+        elif args.episodes and '-' in args.episodes:
+            EPISODE_RANGE = args.episodes.split('-')
+            if len(EPISODE_RANGE) != 2 or not all(x.isdigit() for x in EPISODE_RANGE):
+                raise ValueError("Invalid episode range format. Use 'start-end' (e.g. 1-5).")
+            EPISODE_RANGE = (int(EPISODE_RANGE[0]), int(EPISODE_RANGE[1]))
+            if EPISODE_RANGE[0] <= 0 or EPISODE_RANGE[1] <= 0:
+                raise ValueError("Episode numbers must be positive integers.")
+            if EPISODE_RANGE[0] > EPISODE_RANGE[1]:
+                raise ValueError("Start episode must be less than or equal to end episode.")
+            if EPISODE_RANGE[1] - EPISODE_RANGE[0] + 1 > MAX_EPISODES:
+                raise ValueError(f"Cannot download more than {MAX_EPISODES} episodes at once.")
         else:
-            raise ValueError("No episode number found in URL. "
-                             "Please specify with --episode or --episodes.")
-    
-    SERIES_ID = re.search(r'id=(\d+)', Miruro_URL)
-    if SERIES_ID:
-        SERIES_ID = SERIES_ID.group(1)
-        print(f"[*] Series ID: {SERIES_ID}")
-    else:
-        print("[!] Could not determine series ID from URL. "
-              "Please ensure the URL is correct and contains a valid series ID.")
-        conn.close()
-        sys.exit(1)
+            # Ensure the URL contains &ep=NUM at the end
+            if Miruro_URL.rsplit("&ep=", 1)[-1].isdigit():
+                EPISODE_NUMBER = int(re.sub("[^0-9]", "", args.url[-4:]))
+                if EPISODE_NUMBER <= 0:
+                    raise ValueError("Could not determine episode number from URL. "
+                                    "Please specify with --episode or --episodes.")
+                EPISODE_RANGE = (EPISODE_NUMBER, EPISODE_NUMBER)
+            else:
+                raise ValueError("No episode number found in URL. "
+                                "Please specify with --episode or --episodes.")
+        
+        SERIES_ID = re.search(r'id=(\d+)', Miruro_URL)
+        if SERIES_ID:
+            SERIES_ID = SERIES_ID.group(1)
+            print(f"[*] Series ID: {SERIES_ID}")
+        else:
+            print("[!] Could not determine series ID from URL. "
+                "Please ensure the URL is correct and contains a valid series ID.")
+            conn.close()
+            sys.exit(1)
 
-    if args.follow:
-        FOLLOW = True
-        print("[*] Following the series for new episodes...")
-    
-    print(f"[*] Downloading episodes {EPISODE_RANGE[0]} to {EPISODE_RANGE[1]}")
+        if args.follow:
+            FOLLOW = True
+            print("[*] Following the series for new episodes...")
+        
+        print(f"[*] Downloading episodes {EPISODE_RANGE[0]} to {EPISODE_RANGE[1]}")
 
-    for episode in range(EPISODE_RANGE[0], EPISODE_RANGE[1]+1):
-        for i in range(MAX_RETRIES):
-            try:
-                EPISODE_NUMBER = episode
-                Miruro_URL =  Miruro_URL.rsplit("&ep=", 1)[0]
-                Miruro_URL = f"{Miruro_URL}&ep={episode}"
-                print(f"Miruro URL: {Miruro_URL}")
-                print(f"Downloading episode {episode}")
-                kwik_f_url = get_kwik_download_page(Miruro_URL)
-                get_kwik_download_link(kwik_f_url)
-                saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
-                print(f"\n[OK] Done! File saved to: {saved}\n")
-                break  # Exit retry loop on success
-            except KeyboardInterrupt:
-                print("\n[!] Cancelled by user.")
-                conn.close()
-                sys.exit(3) # 3 for user cancellation
-            except Exception as exc:  # pylint: disable=broad-except
-                print(f"\n[!] Error: {exc}\n")
-                if args.debug:
-                    raise
-            if i == MAX_RETRIES - 1:
-                print("Max retries reached. Exiting.")
-                cursor.execute('''
-                    UPDATE series
-                    SET download_failed = 1
-                    WHERE miruro_id = ?
-                ''', (SERIES_ID,))
-                conn.commit()
-                conn.close()
-                sys.exit(2) # 2 for download failure
-            print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
-            time.sleep(config.get("retryDelay", 5))
+        for episode in range(EPISODE_RANGE[0], EPISODE_RANGE[1]+1):
+            for i in range(MAX_RETRIES):
+                try:
+                    EPISODE_NUMBER = episode
+                    Miruro_URL =  Miruro_URL.rsplit("&ep=", 1)[0]
+                    Miruro_URL = f"{Miruro_URL}&ep={episode}"
+                    print(f"Miruro URL: {Miruro_URL}")
+                    print(f"Downloading episode {episode}")
+                    kwik_f_url = get_kwik_download_page(Miruro_URL)
+                    get_kwik_download_link(kwik_f_url)
+                    saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
+                    print(f"\n[OK] Done! File saved to: {saved}\n")
+                    break  # Exit retry loop on success
+                except KeyboardInterrupt:
+                    print("\n[!] Cancelled by user.")
+                    conn.close()
+                    sys.exit(3) # 3 for user cancellation
+                except Exception as exc:  # pylint: disable=broad-except
+                    print(f"\n[!] Error: {exc}\n")
+                    if args.debug:
+                        raise
+                if i == MAX_RETRIES - 1:
+                    print("Max retries reached. Exiting.")
+                    cursor.execute('''
+                        UPDATE series
+                        SET download_failed = 1
+                        WHERE miruro_id = ?
+                    ''', (SERIES_ID,))
+                    conn.commit()
+                    conn.close()
+                    sys.exit(2) # 2 for download failure
+                print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
+                time.sleep(config.get("retryDelay", 5))
+    finally:
+        portalocker.unlock(lock_file)
+        lock_file.close()
+        print("[*] Download process completed. Lock released.")
 
 if __name__ == "__main__":
     main()

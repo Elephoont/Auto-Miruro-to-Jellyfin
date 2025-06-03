@@ -2,6 +2,7 @@
     "outputDir": "./output",
     "maxRetries": 3,
     "retryDelay": 1,
-    "maxEpisodes": 25,
-    "scanInterval": 10
+    "maxEpisodes": 30,
+    "scanInterval": 10,
+    "banNSFW": true
 }

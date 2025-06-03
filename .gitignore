@@ -5,3 +5,4 @@ tmp-profile/
 .env
 .vscode/
 hue.db
+download.lock
