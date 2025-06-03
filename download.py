@@ -1,5 +1,7 @@
 from playwright.sync_api import sync_playwright, TimeoutError
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import requests
 import time
 import json
 import argparse
@@ -12,6 +14,10 @@ import portalocker
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
 # TODO: Raised eyebrow for shows with weird tags
+
+# Load jellyfin API key from .env file
+load_dotenv()
+JELLYFIN_API_KEY = os.getenv("JELLYFIN_API_KEY")
 
 # Path to unpacked uBlock Origin extension
 UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
@@ -505,6 +511,17 @@ def load_config(path=CONFIG_PATH):
     with open(path, "r") as file:
         return json.load(file)
 
+def trigger_jellyfin_scan():
+    url = "http://localhost:8096/Library/Refresh"
+    headers = {
+        "X-Emby-Token": JELLYFIN_API_KEY
+    }
+    response = requests.post(url, headers=headers)
+    if response.status_code == 204:
+        print("[OK] Jellyfin library scan initiated.")
+    else:
+        print(f"[X] Failed to start Jellyfin scan. Status: {response.status_code}")
+
 def main() -> None:
     lock_file = acquire_download_lock()
     try:
@@ -598,6 +615,7 @@ def main() -> None:
                 print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
                 time.sleep(config.get("retryDelay", 5))
     finally:
+
         portalocker.unlock(lock_file)
         lock_file.close()
         print("[*] Download process completed. Lock released.")
