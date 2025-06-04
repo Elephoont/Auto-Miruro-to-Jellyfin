@@ -49,6 +49,9 @@ async def command_allowed(interaction: discord.Interaction):
     password="Password for the Jellyfin user (default: a random password will be generated)"
 )
 async def create_jellyfin_user(interaction: discord.Interaction, username: str = None, password: str = None):    
+    if not await command_allowed(interaction):
+        return
+
     # Check if the user already exists
     conn = sqlite3.connect("hue.db")
     cursor = conn.cursor()
