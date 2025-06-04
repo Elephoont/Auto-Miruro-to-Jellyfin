@@ -240,9 +240,11 @@ async def add_follow(msg, user_id, series_id, notify=False, dub=False, download_
             stdout, stderr = await result.communicate()
             if result.returncode != 0:
                 print(f"[!] Download failed for series ID {series_id}: {stderr.decode().strip()}")
+                print(f"[!] Output: {stdout.decode().strip()}")
                 conn.close()
                 return False
             print(f"[+] Download completed for series ID {series_id}: {stdout.decode().strip()}")
+            print(f"[+] Output: {stdout.decode().strip()}")
         except Exception as e:
             print(f"[!] Exception during download for series ID {series_id}: {e}")
             conn.close()
@@ -332,7 +334,7 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
         return
 
     # Tell user that the series was successfully followed
-    msg.edit(content=f"Successfully followed and downloaded series ID {SERIES_ID}. ")
+    await msg.edit(content=f"Successfully followed and downloaded series ID {SERIES_ID}. ")
 
     await interaction.followup.send(
         f"Successfully followed series ID {SERIES_ID}.",
