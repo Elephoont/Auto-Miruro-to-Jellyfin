@@ -566,11 +566,14 @@ async def check_for_episodes():
             if "(Dubbed)" in title:
                 command.append("--dub")
 
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True
+            result = asyncio.create_subprocess_exec(
+                *command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
+            stdout, stderr = await result.communicate()
+            output = stdout.decode().strip() or "No output."
+            error = stderr.decode().strip()
 
             if result.returncode == 0:
                 print(f"[OK] Download successful for '{title}'")
