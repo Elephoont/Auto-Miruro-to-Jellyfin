@@ -7,6 +7,8 @@ import asyncio
 import sqlite3
 import re
 import datetime
+import requests
+
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -17,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 JELLYFIN_URL = os.getenv("JELLYFIN_URL")
+JELLYFIN_API_KEY = os.getenv("JELLYFIN_API_KEY")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -40,6 +43,84 @@ async def command_allowed(interaction: discord.Interaction):
         return False
     return True
 
+@bot.tree.command(name="create_jellyfin_user", description="Create a user for the Jellyfin server")
+@app_commands.describe(
+    username="Username for the Jellyfin user (default: your Discord username)",
+    password="Password for the Jellyfin user (default: a random password will be generated)"
+)
+async def create_jellyfin_user(interaction: discord.Interaction, username: str = None, password: str = None):    
+    # Check if the user already exists
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS jellyfin_users (
+            discord_id INTEGER PRIMARY KEY,
+            jellyfin_username TEXT NOT NULL,
+            jellyfin_password TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    cursor.execute('SELECT jellyfin_username, jellyfin_password FROM jellyfin_users WHERE discord_id = ?', (interaction.user.id,))
+    existing_user = cursor.fetchone()
+    
+    if existing_user:
+        existing_username, existing_password = existing_user
+        await interaction.response.send_message(
+            f"You already have a Jellyfin user linked:\nUsername: {existing_username}\nPassword: {existing_password}\n",
+            ephemeral=True # Very important
+        )
+        conn.close()
+        return True
+    
+    # Create a new Jellyfin user
+    jellyfin_username = re.sub(r'\W+', '', username or interaction.user.name)
+    jellyfin_password = password or os.urandom(16).hex()  # Generate a random password if not provided
+
+    try:
+        # Call the Jellyfin API to create a new user
+        headers = {
+            "X-Emby-Authorization": f'MediaBrowser Client="AutoBot", Device="DiscordBot", DeviceId="{interaction.user.id}", Version="1.0.0", Token="{JELLYFIN_API_KEY}"',
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "Name": jellyfin_username,
+            "Password": jellyfin_password,
+            "IsAdministrator": False,  # Set to True if you want the user to have admin rights
+            "EnableUserPreferenceAccess": True,
+            "EnablePublicSharing": False,
+            "EnableSyncTranscoding": True
+        }
+        response = await requests.post(f"http://localhost:8096/Users/New", headers=headers, json=payload)
+        if response.status_code in {200, 204}:
+            # User created successfully, store in database
+            cursor.execute('''
+                INSERT INTO jellyfin_users (discord_id, jellyfin_username, jellyfin_password)
+                VALUES (?, ?, ?)
+            ''', (interaction.user.id, jellyfin_username, jellyfin_password))
+            conn.commit()
+            await interaction.response.send_message(
+                f"Jellyfin user created successfully:\nUsername: {jellyfin_username}\nPassword: {jellyfin_password}\n",
+                ephemeral=True
+            )
+            print(f"[+] Created Jellyfin user for {interaction.user.name} ({interaction.user.id})")
+            conn.close()
+            return True
+        else:
+            await interaction.response.send_message(
+                f"[X] Failed to create Jellyfin user: {response.text}",
+                ephemeral=True
+            )
+            print(f"[!] Failed to create Jellyfin user for {interaction.user.name} ({interaction.user.id}): {response.text}")
+    except Exception as e:
+        await interaction.response.send_message(
+            f"[X] An error occurred while creating the Jellyfin user: {str(e)}",
+            ephemeral=True
+        )
+        print(f"[!] Exception during Jellyfin user creation for {interaction.user.name} ({interaction.user.id}): {e}")
+    finally:
+        conn.close()
+        return False
+             
 async def create_tables(conn, cursor=None):
     if not cursor:
         cursor = conn.cursor()
