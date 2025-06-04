@@ -14,6 +14,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 # TODO: Improve error handling and logging
+# TODO: Add a check to ensure that download_failed does not get marked as True if it is trying to download next_episode before the air time
+# TODO: Pull any failed episode downloads and retry if it makes sense to
 
 # Load token from .env
 load_dotenv()
@@ -43,12 +45,33 @@ async def command_allowed(interaction: discord.Interaction):
         return False
     return True
 
-@bot.tree.command(name="create_jellyfin_user", description="Create a user for the Jellyfin server")
+async def has_account(interaction: discord.Interaction):
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS jellyfin_users (
+            discord_id INTEGER PRIMARY KEY,
+            jellyfin_username TEXT NOT NULL,
+            jellyfin_password TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    cursor.execute('''
+        SELECT jellyfin_username FROM jellyfin_users WHERE discord_id = ?
+    ''', (interaction.user.id))
+    existing_user = cursor.fetchone()
+    
+    if existing_user:
+        return True
+    else:
+        return False
+
+@bot.tree.command(name="create_user", description="Create a user for the Jellyfin server")
 @app_commands.describe(
     username="Username for the Jellyfin user (default: your Discord username)",
     password="Password for the Jellyfin user (default: a random password will be generated)"
 )
-async def create_jellyfin_user(interaction: discord.Interaction, username: str = None, password: str = None):    
+async def create_user(interaction: discord.Interaction, username: str = None, password: str = None):    
     if not await command_allowed(interaction):
         return
 
@@ -280,8 +303,14 @@ async def link(interaction: discord.Interaction):
         return
 
     await interaction.response.defer()  # Defer the response
+
+    # Tell the user to create an account
+    account_message = ""
+    if has_account(interaction):
+        account_message = f"\nTo access it, create an account with the /create_user command"
+
     await interaction.followup.send(
-        f"Direct link to the Jellyfin server: {JELLYFIN_URL}",
+        f"Direct link to the Jellyfin server: {JELLYFIN_URL}{account_message}",
     )
 
 @bot.tree.command(name="follow", description="Follow a series to automatically download new episodes")
@@ -293,8 +322,15 @@ async def link(interaction: discord.Interaction):
 async def follow(interaction: discord.Interaction, link: str, notify: bool = False, dub: bool = False):
     if not await command_allowed(interaction):
         return
-    
+
     await interaction.response.defer(thinking=True, ephemeral=True)
+
+    # Block command until user has an account
+    if not has_account(interaction):
+        interaction.followup.send(
+            "First, you need to create an account with the /create_user command."
+        )
+        return
 
     # Validate the link format (valid tld are .to, .tv, .online)
     if not re.match(r'^https?://(www\.)?miruro\.(to|tv|online)/watch\?id=\d+(&ep=\d+)?$', link):
@@ -353,6 +389,13 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
     
     await interaction.response.defer(thinking=True, ephemeral=True)
 
+    # Block command until user has an account
+    if not has_account(interaction):
+        interaction.followup.send(
+            "First, you need to create an account with the /create_user command."
+        )
+        return
+
     # Validate the link format (valid tld are .to, .tv, .online)
     if not re.match(r'^https?://(www\.)?miruro\.(to|tv|online)/watch\?id=\d+(&ep=\d+)?$', link):
         await interaction.followup.send(
@@ -407,6 +450,13 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         return
 
     await interaction.response.defer(thinking=True, ephemeral=True)
+
+    # Block command until user has an account
+    if not has_account(interaction):
+        interaction.followup.send(
+            "First, you need to create an account with the /create_user command."
+        )
+        return
 
     # Validate the link format (valid tld are .to, .tv, .online)
     if not re.match(r'^https?://(www\.)?miruro\.(to|tv|online)/watch\?id=\d+(&ep=\d+)?$', link):
@@ -503,6 +553,7 @@ async def schedule_episode_checks():
     while True:
         try:
             await check_for_episodes()
+            print("[*] Scheduler check complete.\n")
         except Exception as e:
             print(f"[!] Scheduler error: {e}")
         await asyncio.sleep((CONFIG.get('scanInterval', 10) * 60))  # wait however many minutes set in config
@@ -543,7 +594,7 @@ async def check_for_episodes():
 
     # Select series that are airing and have at least one follower
     cursor.execute('''
-        SELECT DISTINCT s.miruro_id, s.next_episode, s.title
+        SELECT DISTINCT s.miruro_id, s.next_episode, s.title, s.season, s.next_episode_time
         FROM series s
         JOIN follows f ON s.miruro_id = f.miruro_id
         WHERE s.is_airing = 1
@@ -558,9 +609,25 @@ async def check_for_episodes():
         print("[*] No new episodes to download.")
         conn.close()
         return
-    
-    for miruro_id, next_episode, title in series_to_download:
+
+    for miruro_id, next_episode, title, season, next_episode_time in series_to_download:
         try:
+            # Check if the episode actually needs to be downloaded
+            cursor.execute('''
+                SELECT title FROM episodes WHERE miruro_id = ? AND season = ? AND episode = ?          
+            ''', (miruro_id, season, next_episode))
+            recent_episode = cursor.fetchone()
+
+            if recent_episode:
+                cursor.execute('''
+                    SELECT title FROM episodes WHERE miruro_id = ? AND season = ? AND episode = ?
+                ''', (miruro_id, season, 1))
+                first_episode = cursor.fetchone()
+
+                if first_episode and first_episode == recent_episode and datetime.datetime.fromisoformat(next_episode_time) > datetime.datetime.now(): # (First episode has been downloaded) and (newly aired episode wasnt available when it failed) and (new episode shouldnt have aired yet)
+                    print(f"[!] Skipping download for {title} S{season}E{next_episode}. Episode name in DB matches episode 1")
+                    continue
+
             print(f"[>] Attempting download for '{title} ep {next_episode}' (ID: {miruro_id})...")
 
             # Add dub flag if needed
@@ -602,8 +669,6 @@ async def check_for_episodes():
 
     conn.commit()
     conn.close()
-    print("[*] Scheduler check complete.\n")
-
 
 @bot.event
 async def on_ready():
