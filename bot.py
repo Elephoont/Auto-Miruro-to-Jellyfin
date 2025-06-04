@@ -90,7 +90,7 @@ async def create_jellyfin_user(interaction: discord.Interaction, username: str =
             "EnablePublicSharing": False,
             "EnableSyncTranscoding": True
         }
-        response = await requests.post(f"http://localhost:8096/Users/New", headers=headers, json=payload)
+        response = requests.post(f"http://localhost:8096/Users/New", headers=headers, json=payload)
         if response.status_code in {200, 204}:
             # User created successfully, store in database
             cursor.execute('''
