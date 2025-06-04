@@ -566,7 +566,7 @@ async def check_for_episodes():
             if "(Dubbed)" in title:
                 command.append("--dub")
 
-            result = asyncio.create_subprocess_exec(
+            result = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
