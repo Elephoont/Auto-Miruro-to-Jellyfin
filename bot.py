@@ -486,24 +486,6 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         num_episodes = 1
     if dub:
         args += " --dub"
-    
-    if follow:
-        # args += " --follow"
-
-        SERIES_ID = re.search(r'id=(\d+)', link)
-        if SERIES_ID:
-            SERIES_ID = SERIES_ID.group(1)
-            print(f"[*] Series ID: {SERIES_ID}")
-        else:
-            await interaction.followup.send(
-                "[X] Could not determine series ID from URL. "
-                "Please ensure the URL is correct and contains a valid series ID.",
-                ephemeral=True
-            )
-            return
-
-        # Add or update the follow entry in the database
-        add_follow(interaction.user.id, SERIES_ID, notify=False, dub=dub, download_all=False)
 
     if num_episodes > CONFIG.get("MAX_EPISODES", 25):
         await interaction.followup.send(
@@ -525,6 +507,21 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         wait=True,
         ephemeral=True
     )
+
+    if follow:
+        # args += " --follow"
+
+        SERIES_ID = re.search(r'id=(\d+)', link)
+        if SERIES_ID:
+            SERIES_ID = SERIES_ID.group(1)
+            print(f"[*] Series ID: {SERIES_ID}")
+        else:
+            await msg.edit(
+                "[X] Could not determine series ID from URL.\nPlease ensure the URL is correct and contains a valid series ID."
+            )
+
+        # Add or update the follow entry in the database
+        add_follow(msg, interaction.user.id, SERIES_ID, notify=False, dub=dub, download_all=False)
 
     try:
         # Run download script and capture output/errors
