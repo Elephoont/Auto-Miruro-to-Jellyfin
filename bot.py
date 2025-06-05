@@ -67,6 +67,12 @@ async def has_account(interaction: discord.Interaction):
     else:
         return False
 
+async def edit_or_send(msg, interaction: discord.Interaction, content):
+    try:
+        await msg.edit(content=content)
+    except:
+        interaction.followup.send(content)
+
 @bot.tree.command(name="create_user", description="Create a user for the Jellyfin server")
 @app_commands.describe(
     username="Username for the Jellyfin user (default: your Discord username)",
@@ -123,7 +129,7 @@ async def create_user(interaction: discord.Interaction, username: str = None, pa
             cursor.execute('''
                 INSERT INTO jellyfin_users (discord_id, jellyfin_username, jellyfin_password)
                 VALUES (?, ?, ?)
-            ''', (interaction.user.id, jellyfin_username, jellyfin_password))
+            ''', (int(interaction.user.id), jellyfin_username, jellyfin_password))
             conn.commit()
             await interaction.response.send_message(
                 f"Jellyfin user created successfully:\nUsername: {jellyfin_username}\nPassword: {jellyfin_password}\n",
@@ -186,10 +192,11 @@ async def create_tables(conn, cursor=None):
     ''')
     conn.commit()
 
-async def add_follow(msg, user_id, series_id, notify=False, dub=False, download_all=True):
+async def add_follow(msg, interaction, series_id, notify=False, dub=False, download_all=True):
     conn = sqlite3.connect("hue.db")
     cursor = conn.cursor()
     await create_tables(conn, cursor)
+    user_id = interaction.user.id
     cursor.execute('''
         INSERT OR REPLACE INTO follows (user_id, miruro_id, notify)
         VALUES (?, ?, ?)
@@ -211,13 +218,13 @@ async def add_follow(msg, user_id, series_id, notify=False, dub=False, download_
             )
             stdout, stderr = await result.communicate()
 
-            output = stdout.decode().strip() or "No output."
+            output = stdout.decode(errors="replace").strip() or "No output."
             error = stderr.decode().strip()
 
             response = await parse_download_response(result, output, error)
 
             if response == "<:eyebrowraised:1379311747277787207>":
-                await msg.edit(content=response[:2000])  # Discord message limit
+                await edit_or_send(msg, interaction, response)
                 conn.close()
                 return "no"
         except Exception as e:
@@ -360,21 +367,16 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
     )
 
     # Add or update the follow entry in the database
-    followed = await add_follow(msg, interaction.user.id, SERIES_ID, notify, dub)
+    followed = await add_follow(msg, interaction, SERIES_ID, notify, dub)
     if not followed :
-        await msg.edit(content="[X] Failed to gather series information. Please check the link and try again.")
+        await edit_or_send(msg, interaction, "[X] Failed to gather series information. Please check the link and try again.")
         return
     
     if followed == "no":
         return
 
     # Tell user that the series was successfully followed
-    await msg.edit(content=f"Successfully followed and downloaded series ID {SERIES_ID}. ")
-
-    await interaction.followup.send(
-        f"Successfully followed series ID {SERIES_ID}.",
-        ephemeral=True
-    )
+    await edit_or_send(msg, interaction, f"Successfully followed and downloaded series ID {SERIES_ID}. ")
 
 @bot.tree.command(name="notify", description="Get notified when new episodes air for a series")
 @app_commands.describe(
@@ -423,9 +425,9 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
     )
 
     # Add or update the follow entry in the database
-    following = await add_follow(msg, interaction.user.id, SERIES_ID, notify, dub)
+    following = await add_follow(msg, interaction, SERIES_ID, notify, dub)
     if not following:
-        await msg.edit(content="[X] Failed to gather series information. Please check the link and try again.")
+        await edit_or_send(msg, interaction, "[X] Failed to gather series information. Please check the link and try again.")
         return
     
     if following == "no":
@@ -516,12 +518,10 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
             SERIES_ID = SERIES_ID.group(1)
             print(f"[*] Series ID: {SERIES_ID}")
         else:
-            await msg.edit(
-                "[X] Could not determine series ID from URL.\nPlease ensure the URL is correct and contains a valid series ID."
-            )
-
+            await edit_or_send(msg, interaction, "[X] Could not determine series ID from URL.\nPlease ensure the URL is correct and contains a valid series ID.")
+                
         # Add or update the follow entry in the database
-        await add_follow(msg, interaction.user.id, SERIES_ID, notify=False, dub=dub, download_all=False)
+        await add_follow(msg, interaction, SERIES_ID, notify=False, dub=dub, download_all=False)
 
     try:
         # Run download script and capture output/errors
@@ -534,16 +534,16 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         )
         stdout, stderr = await result.communicate()
 
-        output = stdout.decode().strip() or "No output."
+        output = stdout.decode(errors="replace").strip() or "No output."
         error = stderr.decode().strip()
         
         response = await parse_download_response(result, output, error)
 
         print(f"[>] Download result: {response}")
-        await msg.edit(content=response[:2000])  # Discord message limit
+        await edit_or_send(msg, interaction, response)
     except Exception as e:
         print(f"[!] Exception during download: {e}")
-        await msg.edit(content=f"[X] An unexpected error occurred:\n```{str(e)}```")
+        await edit_or_send(msg, interaction, f"[X] An unexpected error occurred:\n```{str(e)}```")
 
 async def schedule_episode_checks():
     while True:
@@ -637,7 +637,7 @@ async def check_for_episodes():
                 stderr=subprocess.PIPE
             )
             stdout, stderr = await result.communicate()
-            output = stdout.decode().strip() or "No output."
+            output = stdout.decode(errors="replace").strip() or "No output."
             error = stderr.decode().strip()
 
             if result.returncode == 0:
