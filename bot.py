@@ -100,7 +100,7 @@ async def create_user(interaction: discord.Interaction, username: str = None, pa
     
     # Create a new Jellyfin user
     jellyfin_username = re.sub(r'\W+', '', username or interaction.user.name)
-    jellyfin_password = password or os.urandom(16).hex()  # Generate a random password if not provided
+    jellyfin_password = password or os.urandom(8).hex()  # Generate a random password if not provided
 
     try:
         # Call the Jellyfin API to create a new user
