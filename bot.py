@@ -100,7 +100,7 @@ async def create_user(interaction: discord.Interaction, username: str = None, pa
     
     # Create a new Jellyfin user
     jellyfin_username = re.sub(r'\W+', '', username or interaction.user.name)
-    jellyfin_password = password or os.urandom(8).hex()  # Generate a random password if not provided
+    jellyfin_password = password or os.urandom(4).hex()  # Generate a random password if not provided
 
     try:
         # Call the Jellyfin API to create a new user
@@ -310,7 +310,7 @@ async def link(interaction: discord.Interaction):
         account_message = f"\nTo access it, create an account with the /create_user command"
 
     await interaction.followup.send(
-        f"Direct link to the Jellyfin server: {JELLYFIN_URL}{account_message}",
+        f"Direct link to the Jellyfin server: {JELLYFIN_URL}{account_message}\nDownload episodes using links from https://www.miruro.to/",
     )
 
 @bot.tree.command(name="follow", description="Follow a series to automatically download new episodes")
