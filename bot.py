@@ -328,7 +328,7 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
 
     # Block command until user has an account
     if not await has_account(interaction):
-        interaction.followup.send(
+        await interaction.followup.send(
             "First, you need to create an account with the /create_user command."
         )
         return
@@ -390,7 +390,7 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
 
     # Block command until user has an account
     if not await has_account(interaction):
-        interaction.followup.send(
+        await interaction.followup.send(
             "First, you need to create an account with the /create_user command."
         )
         return
@@ -452,7 +452,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
 
     # Block command until user has an account
     if not await has_account(interaction):
-        interaction.followup.send(
+        await interaction.followup.send(
             "First, you need to create an account with the /create_user command."
         )
         return
