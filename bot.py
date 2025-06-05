@@ -226,7 +226,7 @@ async def add_follow(msg, user_id, series_id, notify=False, dub=False, download_
             return False
 
     if download_all:
-        # Download the entire season (up to MAX_EPISODES)
+        # Download the entire season (up to maxEpisodes)
         cursor.execute('''
             SELECT miruro_id, title, season, episode_count, episodes_aired, next_episode_time, next_episode, is_airing
             FROM series WHERE miruro_id = ?
@@ -245,10 +245,10 @@ async def add_follow(msg, user_id, series_id, notify=False, dub=False, download_
         
         episode_range = f"1-{episodes_aired + 1}" if episodes_aired < episode_count else f"1-{episode_count}"
 
-        if episode_count > CONFIG.get("MAX_EPISODES", 25):
-            episode_range = f"{(episodes_aired + 1) - CONFIG.get('MAX_EPISODES', 30) + 1}-{episodes_aired + 1}"
+        if episode_count > CONFIG.get("maxEpisodes", 25):
+            episode_range = f"{(episodes_aired + 1) - CONFIG.get('maxEpisodes', 30) + 1}-{episodes_aired + 1}"
             print(f"[!] Episode count for series '{title} Season {season}' exceeds maximum episode count. "
-                f"Downloading only {CONFIG.get('MAX_EPISODES', 30)} most recent episodes. ")
+                f"Downloading only {CONFIG.get('maxEpisodes', 30)} most recent episodes. ")
             
         args = f"--episodes {episode_range}"
         if dub:
@@ -440,7 +440,7 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
 @bot.tree.command(name="download", description="Download an episode from Miruro.to")
 @app_commands.describe(
     link="Direct link to the episode page",
-    episodes=f"Episode number or range to download (e.g. 1 or 2-5) [MAX {CONFIG.get('MAX_EPISODES', 25)} episodes]",
+    episodes=f"Episode number or range to download (e.g. 1 or 2-5) [MAX {CONFIG.get('maxEpisodes', 25)} episodes]",
     dub="Whether to download the dubbed version (default: false)",
     follow="Automatically download new episodes as they release (default: false)"
 )
@@ -487,9 +487,9 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
     if dub:
         args += " --dub"
 
-    if num_episodes > CONFIG.get("MAX_EPISODES", 25):
+    if num_episodes > CONFIG.get("maxEpisodes", 25):
         await interaction.followup.send(
-            f"[X] You can only download up to {CONFIG.get('MAX_EPISODES', 25)} episodes at a time.",
+            f"[X] You can only download up to {CONFIG.get('maxEpisodes', 25)} episodes at a time.",
             ephemeral=True
         )
         return
