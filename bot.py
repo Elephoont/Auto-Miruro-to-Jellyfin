@@ -480,7 +480,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
                 ephemeral=True
             )
             return
-        num_episodes = int(episodes.split('-')[1]) - int(episodes.split('-')[0]) + 1
+        num_episodes = (int(episodes.split('-')[1]) - int(episodes.split('-')[0])) + 1
     else:
         args = f"--episode {episodes}"
         num_episodes = 1
@@ -489,7 +489,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
 
     if num_episodes > CONFIG.get("MAX_EPISODES", 25):
         await interaction.followup.send(
-            f"[X] You can only download up to {CONFIG['MAX_EPISODES']} episodes at a time.",
+            f"[X] You can only download up to {CONFIG.get('MAX_EPISODES', 25)} episodes at a time.",
             ephemeral=True
         )
         return
@@ -521,7 +521,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
             )
 
         # Add or update the follow entry in the database
-        add_follow(msg, interaction.user.id, SERIES_ID, notify=False, dub=dub, download_all=False)
+        await add_follow(msg, interaction.user.id, SERIES_ID, notify=False, dub=dub, download_all=False)
 
     try:
         # Run download script and capture output/errors
