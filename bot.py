@@ -306,7 +306,7 @@ async def link(interaction: discord.Interaction):
 
     # Tell the user to create an account
     account_message = ""
-    if has_account(interaction):
+    if await has_account(interaction):
         account_message = f"\nTo access it, create an account with the /create_user command"
 
     await interaction.followup.send(
@@ -326,7 +326,7 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Block command until user has an account
-    if not has_account(interaction):
+    if not await has_account(interaction):
         interaction.followup.send(
             "First, you need to create an account with the /create_user command."
         )
@@ -347,16 +347,14 @@ async def follow(interaction: discord.Interaction, link: str, notify: bool = Fal
         print(f"[*] Series ID: {SERIES_ID}")
     else:
         await interaction.followup.send(
-            "[X] Could not determine series ID from URL. "
-            "Please ensure the URL is correct and contains a valid series ID.",
+            "[X] Could not determine series ID from URL.\nPlease ensure the URL is correct and contains a valid series ID.",
             ephemeral=True
         )
         return
 
     # Tell user that it is attempting to download all episodes
     msg = await interaction.followup.send(
-        f"Attempting to follow series ID {SERIES_ID} and download all episodes. "
-        "This may take a while depending on the number of episodes.",
+        f"Attempting to follow series ID {SERIES_ID} and download all episodes.\nThis may take a while depending on the number of episodes.",
         ephemeral=True
     )
 
@@ -390,7 +388,7 @@ async def notify(interaction: discord.Interaction, link: str, notify: bool = Tru
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Block command until user has an account
-    if not has_account(interaction):
+    if not await has_account(interaction):
         interaction.followup.send(
             "First, you need to create an account with the /create_user command."
         )
@@ -452,7 +450,7 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     # Block command until user has an account
-    if not has_account(interaction):
+    if not await has_account(interaction):
         interaction.followup.send(
             "First, you need to create an account with the /create_user command."
         )
@@ -654,7 +652,8 @@ async def check_for_episodes():
                 # Notify users who follow this series
                 await notify_users(miruro_id, title, next_episode, conn, cursor)
             else:
-                print(f"[X] Download failed for '{title}'. Error:\n{result.stderr}")
+                error = stderr.decode().strip()
+                print(f"[X] Download failed for '{title}'. Error:\n{error}")
                 cursor.execute('''
                     UPDATE series SET download_failed = 1, last_checked = CURRENT_TIMESTAMP
                     WHERE miruro_id = ?
