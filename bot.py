@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 # TODO: Improve error handling and logging
 # TODO: Add a check to ensure that download_failed does not get marked as True if it is trying to download next_episode before the air time
 # TODO: Pull any failed episode downloads and retry if it makes sense to
+# TODO: Determine if too much time has passed to edit msg
 
 # Load token from .env
 load_dotenv()
@@ -58,7 +59,7 @@ async def has_account(interaction: discord.Interaction):
     conn.commit()
     cursor.execute('''
         SELECT jellyfin_username FROM jellyfin_users WHERE discord_id = ?
-    ''', (interaction.user.id))
+    ''', (int(interaction.user.id),))
     existing_user = cursor.fetchone()
     
     if existing_user:
@@ -86,7 +87,7 @@ async def create_user(interaction: discord.Interaction, username: str = None, pa
         )
     ''')
     conn.commit()
-    cursor.execute('SELECT jellyfin_username, jellyfin_password FROM jellyfin_users WHERE discord_id = ?', (interaction.user.id,))
+    cursor.execute('SELECT jellyfin_username, jellyfin_password FROM jellyfin_users WHERE discord_id = ?', (int(interaction.user.id),))
     existing_user = cursor.fetchone()
     
     if existing_user:

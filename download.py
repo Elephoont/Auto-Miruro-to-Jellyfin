@@ -13,7 +13,7 @@ import portalocker
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
-# TODO: Raised eyebrow for shows with weird tags
+# TODO: Add support for shows that havent begun airing
 
 # Load jellyfin API key from .env file
 load_dotenv()
