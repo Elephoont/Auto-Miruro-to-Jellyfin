@@ -93,13 +93,20 @@ def get_kwik_download_page(miruro_url):
         page.goto(miruro_url)
         page.wait_for_timeout(5000)  # wait for JavaScript content
 
-        # Get basic episode and series information
-        gather_episode_info(page, browser)
-
-        if FOLLOW:
-            print("[*] Following the series. No download will be performed.") # Bot script should next attempt to download the whole season
-            browser.close()
-            return "skip"
+        # Get episodes_aired before gather_episode_info()
+        info_blocks = page.query_selector_all("div.t4mg1tz p")
+        episodes = None
+        for block in info_blocks:
+            text = block.inner_text().strip()
+            if "Episodes" in text:
+                match = re.search(r'Episodes:\s*([\d,]+)(?:\s*/\s*(\d+))?', text) # optionally looks for total episodes
+                if match:
+                    episodes = match
+                    break
+        print(f"[+] {episodes} episodes found in the series info block.")
+        if episodes:
+            EPISODES_AIRED = int(episodes.group(1).replace(',', ''))
+            EPISODES_IN_SEASON = int(episodes.group(2).replace(',', '')) if episodes.group(2) else EPISODES_AIRED + 2 # Default to aired + 2 if not specified
 
         # Check if the requested episode number matches the page
         match = re.search(r'&ep=(\d+)', miruro_url)
@@ -131,6 +138,14 @@ def get_kwik_download_page(miruro_url):
         if ep_number_element != requested_episode:
             raise ValueError(f"Current episode ({ep_number_element}) does not match requested episode ({requested_episode}). "
                              "Please check the URL or specify the episode with --episode or --episodes.")
+
+        # Now that the page has been confirmed to be correct, gather basic info about the episode/series
+        gather_episode_info(page, browser) # TODO: this needs to be moved down to prevent series table from being overwritten 
+
+        if FOLLOW:
+            print("[*] Following the series. No download will be performed.") # Bot script should next attempt to download the whole season
+            browser.close()
+            return "skip"
 
         # Check if the correct playback server is selected
         print("[*] Checking if playback server is Kiwi...")
@@ -390,30 +405,46 @@ def get_kwik_download_link(kwik_f_url):
         # Step 5: Submit form inside browser session to capture download
         print("[*] Submitting form via Playwright to get the real file...")
 
-        with page.expect_download() as download_info:
-            page.evaluate(f'''
-                () => {{
-                    const form = document.createElement('form');
-                    form.method = 'POST';
-                    form.action = '{form_action}';
-                    const tokenInput = document.createElement('input');
-                    tokenInput.type = 'hidden';
-                    tokenInput.name = '_token';
-                    tokenInput.value = '{token}';
-                    form.appendChild(tokenInput);
-                    document.body.appendChild(form);
-                    form.submit();
-                }}
-            ''')
-            download = download_info.value
+        for attempt in range(MAX_RETRIES):
+            try:
+                print(f"[*] Form submission attempt {attempt+1}/{MAX_RETRIES}")
 
-        # Save the downloaded file
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        output_path = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
-        download.save_as(output_path)
+                with page.expect_download(timeout=10000) as download_info:
+                    page.evaluate(f'''
+                        () => {{
+                            const form = document.createElement('form');
+                            form.method = 'POST';
+                            form.action = '{form_action}';
+                            const tokenInput = document.createElement('input');
+                            tokenInput.type = 'hidden';
+                            tokenInput.name = '_token';
+                            tokenInput.value = '{token}';
+                            form.appendChild(tokenInput);
+                            document.body.appendChild(form);
+                            form.submit();
+                        }}
+                    ''')
+                    download = download_info.value
 
-        print(f"[OK] Download complete: {output_path}")
-        browser.close()
+                # Save the downloaded file
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                output_path = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
+                download.save_as(output_path)
+
+                print(f"[OK] Download complete: {output_path}")
+                browser.close()
+                break
+
+            except Exception as e:
+                print(f"[!] Form submission attempt {attempt + 1} failed: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    print("[*] Refreshing kwik.si page to retry...")
+                    page.reload()
+                    page.wait_for_timeout(3000)
+                else:
+                    print("[X] Max download page refreshes reached. Exiting.")
+                    browser.close()
+                    raise
 
         airing = 1  # Default to airing
         if int(EPISODES_AIRED) == int(EPISODES_IN_SEASON) or int(EPISODE_NUMBER) == int(EPISODES_IN_SEASON):
