@@ -37,6 +37,12 @@ CONFIG_PATH = "config.json"
 CONFIG = load_config(CONFIG_PATH)
 
 async def command_allowed(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This bot is only enabled in certain servers"
+        )
+        return False
+    
     allowed_servers = CONFIG.get("allowedServers", None)
     if allowed_servers and interaction.guild.id not in allowed_servers:
         await interaction.response.send_message(

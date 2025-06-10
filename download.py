@@ -10,10 +10,13 @@ import re
 import sys
 import sqlite3
 import portalocker
+import xml.etree.ElementTree as ET
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
 # TODO: Add support for shows that havent begun airing
+# TODO: Add support for making custom.nfo files
+# TODO: Add support for pulling images like thumbnails from Miruro
 
 # Load jellyfin API key from .env file
 load_dotenv()
@@ -36,6 +39,7 @@ MAX_EPISODES = 25  # Maximum episodes to download in one run
 DUB = False  # Default to subbed unless specified
 EPISODES_IN_SEASON = 0 # Number of episodes in the selected season for range validation
 EPISODES_AIRED = 0
+AIRING = False
 CONFIG_PATH = "config.json"
 config = {}
 conn = None
@@ -184,7 +188,7 @@ def get_kwik_download_page(miruro_url):
         raise Exception("Timed out waiting for redirect button.")
 
 def gather_episode_info(page, browser):
-    global SERIES_TITLE, EPISODE_NAME, SEASON_NUMBER, EPISODE_NUMBER, OUTPUT_NAME, EPISODES_IN_SEASON, EPISODES_AIRED
+    global SERIES_TITLE, EPISODE_NAME, SEASON_NUMBER, EPISODE_NUMBER, OUTPUT_NAME, EPISODES_IN_SEASON, EPISODES_AIRED, AIRING
     SERIES_TITLE = page.query_selector("div.title.anime-title a").inner_text()
     if DUB:
         SERIES_TITLE += " (Dubbed)"
@@ -300,6 +304,109 @@ def gather_episode_info(page, browser):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, NEXT_EPISODE_NUMBER, AIRING))
     conn.commit()
+
+async def parse_metadata(page, browser, miruro_id):
+    # Find the href for the MAL link
+    href = await page.get_attribute("a[href^='https://myanimelist.net/anime/']", "href")
+
+    # Extract the MAL ID from the href
+    if href:
+        mal_id = href.rstrip("/").split("/")[-1]
+        print(f"[+] Found MAL ID: {mal_id}")
+    else:
+        print("[X] MAL ID not found.")
+
+    anilist_json_link = f"https://www.miruro.to/api/info/anilist/{miruro_id}"
+    mal_json_link = f"https://www.miruro.to/api/episodes?malId={mal_id}&ongoing={str(AIRING).lower()}"
+
+    try:
+        info_res = requests.get(anilist_json_link)
+        episodes_res = requests.get(mal_json_link)
+
+        if info_res.status_code != 200:
+            print(f"[!] Failed to fetch AniList metadata: {info_res.status_code}")
+            return False
+
+        if episodes_res.status_code != 200:
+            print(f"[!] Failed to fetch episode list: {episodes_res.status_code}")
+            return False
+
+        await create_nfo(info_res.json(), episodes_res.json())
+
+    except Exception as e:
+        print(f"[X] Error fetching metadata: {e}")
+
+async def create_nfo(anilist_json, mal_json):
+    write_series_nfo(anilist_json)
+    write_episode_nfo(mal_json)
+    return
+
+async def write_series_nfo(anilist_json): # info, episodes (respectively)
+    if anilist_json.get("coverImage", {}).get("extraLarge", "") is not "":
+        poster = anilist_json.get("coverImage", {}).get("extraLarge", "")
+    else:
+        poster = anilist_json.get("coverImage", {}).get("large", "")
+
+    if int(SEASON_NUMBER) > 1: # Specific season. Write nfo as season specific
+        season = ET.Element("season")
+
+        ET.SubElement(season, "title").text = anilist_json.get("title", {}).get("english", "")
+        ET.SubElement(season, "seasonnumber").text = str(int(SEASON_NUMBER))
+        ET.SubElement(season, "year").text = str(anilist_json.get("startDate", {}).get("year", ""))
+        ET.SubElement(season, "plot").text = anilist_json.get("description", "")
+        ET.SubElement(season, "rating").text = str(anilist_json.get("averageScore", ""))
+        ET.SubElement(season, "thumb", {"aspect": "poster"}).text = poster
+        ET.SubElement(season, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
+        tree = ET.ElementTree(season)
+        path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "season.nfo")
+
+    else: # No season indicator, defaulting to show overview
+        tvshow = ET.Element("tvshow")
+
+        
+        ET.SubElement(tvshow, "title").text = anilist_json.get("title", {}).get("english", "")
+        ET.SubElement(tvshow, "year").text = str(anilist_json.get("startDate", {}).get("year", ""))
+        ET.SubElement(tvshow, "plot").text = anilist_json.get("description", "")
+        ET.SubElement(tvshow, "rating").text = str(anilist_json.get("averageScore", ""))
+        ET.SubElement(tvshow, "thumb", {"aspect": "poster"}).text = poster
+        ET.SubElement(tvshow, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
+        tree = ET.ElementTree(tvshow)
+        path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "tvshow.nfo")
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+
+async def write_episode_nfo(mal_json):
+    try:
+        TMDB_id, shows_arr = next(iter(mal_json.get("TMDB", "").items()))
+        TMDB_id = int(TMDB_id)
+        shows_arr = shows_arr.get("metadata, {}").get("episodes", [])
+        episode_id = f"{TMDB_id}-S{int(SEASON_NUMBER)}E{int(EPISODE_NUMBER)}"
+        
+        episode_obj = None
+        for ep in shows_arr:
+            if ep.get("id", "") == episode_id:
+                episode_obj = ep
+                break
+        
+        if episode_obj is None:
+            print(f"[!] Episode ID {episode_id} not found in metadata")
+            return False
+
+    except Exception as e:
+        print(f"[!] Couldn't find the key within TMDB: {e}")
+        return False
+    
+    nfo_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER:02}", f"{SERIES_TITLE} S{SEASON_NUMBER:02}E{EPISODE_NUMBER:02}.nfo")
+    episode_xml = ET.Element("episodedetails") 
+    ET.SubElement(episode_xml, "title").text = episode_obj.get("title", "")
+    ET.SubElement(episode_xml, "season").text = str(int(SEASON_NUMBER))
+    ET.SubElement(episode_xml, "episode").text = str(episode_obj.get("number", ""))
+    ET.SubElement(episode_xml, "aired").text = episode_obj.get("airDate", "")
+    ET.SubElement(episode_xml, "plot").text = episode_obj.get("description", "")
+    ET.SubElement(episode_xml, "thumb", {"aspect": "poster"}).text = episode_obj.get("image", "")
+
+    tree = ET.ElementTree(episode_xml)
+    tree.write(nfo_path, encoding="utf-8", xml_declaration=True)
 
 def ensure_kiwi_server_selected(page):
     target_label = "dub" if DUB else "sub"
@@ -635,12 +742,15 @@ def main() -> None:
                         raise
                 if i == MAX_RETRIES - 1:
                     print("Max retries reached. Exiting.")
-                    cursor.execute('''
-                        UPDATE series
-                        SET download_failed = 1
-                        WHERE miruro_id = ?
-                    ''', (SERIES_ID,))
-                    conn.commit()
+                    try:
+                        cursor.execute('''
+                            UPDATE series
+                            SET download_failed = 1
+                            WHERE miruro_id = ?
+                        ''', (SERIES_ID,))
+                        conn.commit()
+                    except Exception as e:
+                        print(f"Error setting download_failed to true: {e}")
                     conn.close()
                     sys.exit(2) # 2 for download failure
                 print(f"Retrying... Attempt ({i+2}/{MAX_RETRIES}) in {config.get('retryDelay', 5)} seconds...")
