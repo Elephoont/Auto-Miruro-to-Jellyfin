@@ -144,7 +144,10 @@ def get_kwik_download_page(miruro_url):
                              "Please check the URL or specify the episode with --episode or --episodes.")
 
         # Now that the page has been confirmed to be correct, gather basic info about the episode/series
-        gather_episode_info(page, browser) # TODO: this needs to be moved down to prevent series table from being overwritten 
+        gather_episode_info(page, browser)
+
+        # Now write .nfo files to ensure jellyfin has reliable metadata
+        parse_metadata(page, browser, SERIES_ID)
 
         if FOLLOW:
             print("[*] Following the series. No download will be performed.") # Bot script should next attempt to download the whole season
