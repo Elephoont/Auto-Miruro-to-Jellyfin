@@ -62,11 +62,11 @@ def get_kwik_download_page(miruro_url):
     row = cursor.fetchone()
     if row and row[0]:
         cursor.execute('''
-            SELECT title FROM series WHERE miruro_id = ?
+            SELECT title, season FROM series WHERE miruro_id = ?
         ''', (SERIES_ID,))
         series_row = cursor.fetchone()
         if series_row:
-            SERIES_TITLE = series_row[0]
+            SERIES_TITLE, SEASON_NUMBER = series_row
         OUTPUT_NAME = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER:02}", f"{SERIES_TITLE} S{SEASON_NUMBER:02}E{EPISODE_NUMBER:02}.mp4")
         print(f"[*] Checking if filename {OUTPUT_NAME} exists...")
         if os.path.exists(OUTPUT_NAME): # Need to query DB for series name etc.
@@ -363,7 +363,6 @@ async def write_series_nfo(anilist_json): # info, episodes (respectively)
     else: # No season indicator, defaulting to show overview
         tvshow = ET.Element("tvshow")
 
-        
         ET.SubElement(tvshow, "title").text = anilist_json.get("title", {}).get("english", "")
         ET.SubElement(tvshow, "year").text = str(anilist_json.get("startDate", {}).get("year", ""))
         ET.SubElement(tvshow, "plot").text = anilist_json.get("description", "")
