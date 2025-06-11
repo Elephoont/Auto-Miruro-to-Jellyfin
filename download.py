@@ -18,8 +18,6 @@ warnings.filterwarnings("ignore", message="The default datetime adapter is depre
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
 # TODO: Add support for shows that havent begun airing
-# TODO: Add support for making custom.nfo files
-# TODO: Add support for pulling images like thumbnails from Miruro
 
 # Load jellyfin API key from .env file
 load_dotenv()
@@ -311,6 +309,19 @@ def gather_episode_info(page, browser):
     ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, NEXT_EPISODE_NUMBER, AIRING))
     conn.commit()
 
+def download_image(url, dest_path):
+    if not url:
+        print(f"[!] No URL provided for image: {dest_path}")
+        return
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        with open(dest_path, "wb") as f:
+            f.write(response.content)
+        print(f"[OK] Downloaded image to {dest_path}")
+    except Exception as e:
+        print(f"[X] Failed to download image {url}: {e}")
+
 def parse_metadata(page, browser, miruro_id):
     # Find the href for the MAL link
     href = page.get_attribute("a[href^='https://myanimelist.net/anime/']", "href")
@@ -324,6 +335,9 @@ def parse_metadata(page, browser, miruro_id):
 
     anilist_json_link = f"https://www.miruro.to/api/info/anilist/{miruro_id}"
     mal_json_link = f"https://www.miruro.to/api/episodes?malId={mal_id}&ongoing={str(AIRING).lower()}"
+
+    print(f"[*] Anilist JSON link: {anilist_json_link}")
+    print(f"[*] MAL JSON link: {mal_json_link}")
 
     try:
         info_res = requests.get(anilist_json_link)
@@ -344,7 +358,7 @@ def parse_metadata(page, browser, miruro_id):
 
 def create_nfo(anilist_json, mal_json):
     write_series_nfo(anilist_json)
-    write_episode_nfo(mal_json)
+    write_episode_nfo(anilist_json, mal_json)
     return
 
 def write_series_nfo(anilist_json): # info, episodes (respectively)
@@ -365,6 +379,8 @@ def write_series_nfo(anilist_json): # info, episodes (respectively)
         ET.SubElement(season, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
         tree = ET.ElementTree(season)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "season.nfo")
+        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "banner.jpg")
+        download_image(anilist_json.get("bannerImage", ""), banner_path)
 
     else: # No season indicator, defaulting to show overview
         tvshow = ET.Element("tvshow")
@@ -377,24 +393,36 @@ def write_series_nfo(anilist_json): # info, episodes (respectively)
         ET.SubElement(tvshow, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
         tree = ET.ElementTree(tvshow)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "tvshow.nfo")
+        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "banner.jpg")
+        download_image(anilist_json.get("bannerImage", ""), banner_path)
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
 
-def write_episode_nfo(mal_json):
+def write_episode_nfo(anilist_json, mal_json):
     try:
-        TMDB_id, shows_arr = next(iter(mal_json.get("TMDB", "").items()))
+        TMDB_id, TMDB_obj = next(iter(mal_json.get("TMDB", "").items()))
         TMDB_id = int(TMDB_id)
-        shows_arr = shows_arr.get("metadata, {}").get("episodes", [])
-        episode_id = f"{TMDB_id}-S{int(SEASON_NUMBER)}E{int(EPISODE_NUMBER)}"
+        shows_arr = TMDB_obj.get("metadata", {}).get("episodes", [])
         
+
+        # Find the episode number the MAL JSON labels it as
+        episodes_in_season = int(anilist_json.get("episodes", "0"))
+        mal_last_episode_number = int(TMDB_obj.get("metadata", {}).get("selectedSeason", {}).get("episode_count", "0"))
+        mal_first_episode_number = (mal_last_episode_number - episodes_in_season) + 1 # (48 - 24) + 1 = 25
+
+        if mal_first_episode_number <= 0: # This only occurs if mal_last_episode_number ends up being 0
+            mal_first_episode_number = 1
+
+        mal_episode_number = mal_first_episode_number + int(EPISODE_NUMBER) - 1
+
         episode_obj = None
         for ep in shows_arr:
-            if ep.get("id", "") == episode_id:
+            if ep.get("number", "") == mal_episode_number:
                 episode_obj = ep
                 break
         
         if episode_obj is None:
-            print(f"[!] Episode ID {episode_id} not found in metadata")
+            print(f"[!] Episode {mal_episode_number} not found in metadata")
             return False
 
     except Exception as e:
