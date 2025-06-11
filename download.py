@@ -384,8 +384,8 @@ def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
         # ET.SubElement(season, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
         tree = ET.ElementTree(season)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "season.nfo")
-        backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"season{SEASON_NUMBER}-backdrop.jpg")
-        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"season{SEASON_NUMBER}-banner.jpg")
+        backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"backdrop.jpg")
+        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"banner.jpg")
 
     else: # No season indicator, defaulting to show overview
         tvshow = ET.Element("tvshow")
