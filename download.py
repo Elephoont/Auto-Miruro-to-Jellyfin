@@ -413,9 +413,7 @@ def write_episode_nfo(anilist_json, mal_json):
         shows_arr = TMDB_obj.get("metadata", {}).get("episodes", [])
 
         # Find the episode number the MAL JSON labels it as
-        episodes_in_season = int(anilist_json.get("episodes", "0"))
-        mal_last_episode_number = int(TMDB_obj.get("metadata", {}).get("selectedSeason", {}).get("episode_count", "0"))
-        mal_first_episode_number = (mal_last_episode_number - episodes_in_season) + 1 # (48 - 24) + 1 = 25
+        mal_first_episode_number = int(shows_arr[0].get("number", 0))
 
         if mal_first_episode_number <= 0: # This only occurs if mal_last_episode_number ends up being 0
             mal_first_episode_number = 1
