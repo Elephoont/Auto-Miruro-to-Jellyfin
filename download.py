@@ -369,7 +369,7 @@ def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
 
     TMDB_id, TMDB_obj = next(iter(mal_json.get("TMDB", "").items()))
     TMDB_id = int(TMDB_id)
-    backdrop_url = TMDB_id.get("metadata", {}).get("tvShowDetails", {}).get("show", {}).get("backdrop_path", "")
+    backdrop_url = TMDB_obj.get("metadata", {}).get("tvShowDetails", {}).get("show", {}).get("backdrop_path", "")
     backdrop_url = f"https://image.tmdb.org/t/p/original{backdrop_url}"
 
     if int(SEASON_NUMBER) > 1: # Specific season. Write nfo as season specific
@@ -385,7 +385,7 @@ def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
         tree = ET.ElementTree(season)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "season.nfo")
         backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"season{SEASON_NUMBER}-backdrop.jpg")
-        download_image(backdrop_url, backdrop_path)
+        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"season{SEASON_NUMBER}-banner.jpg")
 
     else: # No season indicator, defaulting to show overview
         tvshow = ET.Element("tvshow")
@@ -399,7 +399,10 @@ def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
         tree = ET.ElementTree(tvshow)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "tvshow.nfo")
         backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "backdrop.jpg")
-        download_image(backdrop_url, backdrop_path)
+        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "backdrop.jpg")
+        
+    download_image(backdrop_url, backdrop_path)
+    download_image(anilist_json.get("bannerImage", ""), banner_path)
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
 
