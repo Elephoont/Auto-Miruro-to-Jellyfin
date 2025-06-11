@@ -148,7 +148,7 @@ def get_kwik_download_page(miruro_url):
         gather_episode_info(page, browser)
 
         # Create the appropriate directories if they dont exist
-        os.makedirs(os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}"))
+        os.makedirs(os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {int(SEASON_NUMBER):02}"))
 
         # Now write .nfo files to ensure jellyfin has reliable metadata
         parse_metadata(page, browser, SERIES_ID)
