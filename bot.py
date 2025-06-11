@@ -77,7 +77,7 @@ async def edit_or_send(msg, interaction: discord.Interaction, content):
     try:
         await msg.edit(content=content)
     except:
-        await interaction.followup.send(content)
+        await interaction.user.send(content) # DM the user if the interaction has expired
 
 @bot.tree.command(name="create_user", description="Create a user for the Jellyfin server")
 @app_commands.describe(
