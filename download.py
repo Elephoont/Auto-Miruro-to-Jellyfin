@@ -403,7 +403,6 @@ def write_episode_nfo(anilist_json, mal_json):
         TMDB_id, TMDB_obj = next(iter(mal_json.get("TMDB", "").items()))
         TMDB_id = int(TMDB_id)
         shows_arr = TMDB_obj.get("metadata", {}).get("episodes", [])
-        
 
         # Find the episode number the MAL JSON labels it as
         episodes_in_season = int(anilist_json.get("episodes", "0"))
@@ -433,7 +432,7 @@ def write_episode_nfo(anilist_json, mal_json):
     episode_xml = ET.Element("episodedetails") 
     ET.SubElement(episode_xml, "title").text = episode_obj.get("title", "")
     ET.SubElement(episode_xml, "season").text = str(int(SEASON_NUMBER))
-    ET.SubElement(episode_xml, "episode").text = str(episode_obj.get("number", ""))
+    ET.SubElement(episode_xml, "episode").text = str(int(EPISODE_NUMBER))
     ET.SubElement(episode_xml, "aired").text = episode_obj.get("airDate", "")
     ET.SubElement(episode_xml, "plot").text = episode_obj.get("description", "")
     ET.SubElement(episode_xml, "thumb", {"aspect": "poster"}).text = episode_obj.get("image", "")
