@@ -399,8 +399,8 @@ def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
         tree = ET.ElementTree(tvshow)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "tvshow.nfo")
         backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "backdrop.jpg")
-        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "backdrop.jpg")
-        
+        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "banner.jpg")
+
     download_image(backdrop_url, backdrop_path)
     download_image(anilist_json.get("bannerImage", ""), banner_path)
 
