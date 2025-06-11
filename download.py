@@ -11,6 +11,9 @@ import sys
 import sqlite3
 import portalocker
 import xml.etree.ElementTree as ET
+import warnings
+
+warnings.filterwarnings("ignore", message="The default datetime adapter is deprecated*", category=DeprecationWarning)
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
@@ -308,9 +311,9 @@ def gather_episode_info(page, browser):
     ''', (SERIES_ID, SERIES_TITLE, int(SEASON_NUMBER), EPISODES_IN_SEASON, EPISODES_AIRED, NEXT_EPISODE_TIMESTAMP, NEXT_EPISODE_NUMBER, AIRING))
     conn.commit()
 
-async def parse_metadata(page, browser, miruro_id):
+def parse_metadata(page, browser, miruro_id):
     # Find the href for the MAL link
-    href = await page.get_attribute("a[href^='https://myanimelist.net/anime/']", "href")
+    href = page.get_attribute("a[href^='https://myanimelist.net/anime/']", "href")
 
     # Extract the MAL ID from the href
     if href:
@@ -334,18 +337,18 @@ async def parse_metadata(page, browser, miruro_id):
             print(f"[!] Failed to fetch episode list: {episodes_res.status_code}")
             return False
 
-        await create_nfo(info_res.json(), episodes_res.json())
+        create_nfo(info_res.json(), episodes_res.json())
 
     except Exception as e:
         print(f"[X] Error fetching metadata: {e}")
 
-async def create_nfo(anilist_json, mal_json):
+def create_nfo(anilist_json, mal_json):
     write_series_nfo(anilist_json)
     write_episode_nfo(mal_json)
     return
 
-async def write_series_nfo(anilist_json): # info, episodes (respectively)
-    if anilist_json.get("coverImage", {}).get("extraLarge", "") is not "":
+def write_series_nfo(anilist_json): # info, episodes (respectively)
+    if anilist_json.get("coverImage", {}).get("extraLarge"):
         poster = anilist_json.get("coverImage", {}).get("extraLarge", "")
     else:
         poster = anilist_json.get("coverImage", {}).get("large", "")
@@ -377,7 +380,7 @@ async def write_series_nfo(anilist_json): # info, episodes (respectively)
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
 
-async def write_episode_nfo(mal_json):
+def write_episode_nfo(mal_json):
     try:
         TMDB_id, shows_arr = next(iter(mal_json.get("TMDB", "").items()))
         TMDB_id = int(TMDB_id)

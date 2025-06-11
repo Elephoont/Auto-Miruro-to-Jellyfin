@@ -544,7 +544,8 @@ async def download(interaction: discord.Interaction, link: str, episodes: str = 
         error = stderr.decode().strip()
         
         response = await parse_download_response(result, output, error)
-
+        print(error)
+        # print(output)
         print(f"[>] Download result: {response}")
         await edit_or_send(msg, interaction, response)
     except Exception as e:
