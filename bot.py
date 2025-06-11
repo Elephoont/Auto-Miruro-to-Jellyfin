@@ -77,7 +77,7 @@ async def edit_or_send(msg, interaction: discord.Interaction, content):
     try:
         await msg.edit(content=content)
     except:
-        interaction.followup.send(content)
+        await interaction.followup.send(content)
 
 @bot.tree.command(name="create_user", description="Create a user for the Jellyfin server")
 @app_commands.describe(

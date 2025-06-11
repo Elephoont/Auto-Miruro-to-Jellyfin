@@ -357,15 +357,20 @@ def parse_metadata(page, browser, miruro_id):
         print(f"[X] Error fetching metadata: {e}")
 
 def create_nfo(anilist_json, mal_json):
-    write_series_nfo(anilist_json)
+    write_series_nfo(anilist_json, mal_json)
     write_episode_nfo(anilist_json, mal_json)
     return
 
-def write_series_nfo(anilist_json): # info, episodes (respectively)
+def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
     if anilist_json.get("coverImage", {}).get("extraLarge"):
         poster = anilist_json.get("coverImage", {}).get("extraLarge", "")
     else:
         poster = anilist_json.get("coverImage", {}).get("large", "")
+
+    TMDB_id, TMDB_obj = next(iter(mal_json.get("TMDB", "").items()))
+    TMDB_id = int(TMDB_id)
+    backdrop_url = TMDB_id.get("metadata", {}).get("tvShowDetails", {}).get("show", {}).get("backdrop_path", "")
+    backdrop_url = f"https://image.tmdb.org/t/p/original{backdrop_url}"
 
     if int(SEASON_NUMBER) > 1: # Specific season. Write nfo as season specific
         season = ET.Element("season")
@@ -376,11 +381,11 @@ def write_series_nfo(anilist_json): # info, episodes (respectively)
         ET.SubElement(season, "plot").text = anilist_json.get("description", "")
         ET.SubElement(season, "rating").text = str(anilist_json.get("averageScore", ""))
         ET.SubElement(season, "thumb", {"aspect": "poster"}).text = poster
-        ET.SubElement(season, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
+        # ET.SubElement(season, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
         tree = ET.ElementTree(season)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "season.nfo")
-        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "banner.jpg")
-        download_image(anilist_json.get("bannerImage", ""), banner_path)
+        backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"season{SEASON_NUMBER}-backdrop.jpg")
+        download_image(backdrop_url, backdrop_path)
 
     else: # No season indicator, defaulting to show overview
         tvshow = ET.Element("tvshow")
@@ -390,11 +395,11 @@ def write_series_nfo(anilist_json): # info, episodes (respectively)
         ET.SubElement(tvshow, "plot").text = anilist_json.get("description", "")
         ET.SubElement(tvshow, "rating").text = str(anilist_json.get("averageScore", ""))
         ET.SubElement(tvshow, "thumb", {"aspect": "poster"}).text = poster
-        ET.SubElement(tvshow, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
+        # ET.SubElement(tvshow, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
         tree = ET.ElementTree(tvshow)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "tvshow.nfo")
-        banner_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "banner.jpg")
-        download_image(anilist_json.get("bannerImage", ""), banner_path)
+        backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "backdrop.jpg")
+        download_image(backdrop_url, backdrop_path)
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
 
