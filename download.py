@@ -55,6 +55,7 @@ def acquire_download_lock():
     return lock_file
 
 def get_kwik_download_page(miruro_url):
+    global SERIES_TITLE
     # Before opening the browser, check if the episode has already been downloaded
     cursor.execute('''
         SELECT downloaded FROM episodes
@@ -151,7 +152,7 @@ def get_kwik_download_page(miruro_url):
         os.makedirs(os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {int(SEASON_NUMBER):02}"))
 
         # Now write .nfo files to ensure jellyfin has reliable metadata
-        parse_metadata(page, browser, SERIES_ID)
+        parse_metadata(page, browser, SERIES_ID, SERIES_TITLE)
 
         if FOLLOW:
             print("[*] Following the series. No download will be performed.") # Bot script should next attempt to download the whole season
@@ -325,7 +326,7 @@ def download_image(url, dest_path):
     except Exception as e:
         print(f"[X] Failed to download image {url}: {e}")
 
-def parse_metadata(page, browser, miruro_id):
+def parse_metadata(page, browser, miruro_id, SERIES_TITLE):
     # Find the href for the MAL link
     href = page.get_attribute("a[href^='https://myanimelist.net/anime/']", "href")
 
@@ -360,11 +361,11 @@ def parse_metadata(page, browser, miruro_id):
         print(f"[X] Error fetching metadata: {e}")
 
 def create_nfo(anilist_json, mal_json):
-    write_series_nfo(anilist_json, mal_json)
-    write_episode_nfo(anilist_json, mal_json)
+    write_series_nfo(anilist_json, mal_json, SERIES_TITLE)
+    write_episode_nfo(anilist_json, mal_json, SERIES_TITLE)
     return
 
-def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
+def write_series_nfo(anilist_json, mal_json, SERIES_TITLE): # info, episodes (respectively)
     if anilist_json.get("coverImage", {}).get("extraLarge"):
         poster = anilist_json.get("coverImage", {}).get("extraLarge", "")
     else:
@@ -409,7 +410,7 @@ def write_series_nfo(anilist_json, mal_json): # info, episodes (respectively)
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
 
-def write_episode_nfo(anilist_json, mal_json):
+def write_episode_nfo(anilist_json, mal_json, SERIES_TITLE):
     try:
         TMDB_id, TMDB_obj = next(iter(mal_json.get("TMDB", "").items()))
         TMDB_id = int(TMDB_id)
