@@ -55,7 +55,7 @@ def acquire_download_lock():
     return lock_file
 
 def get_kwik_download_page(miruro_url):
-    global SERIES_TITLE
+    global SERIES_TITLE, SEASON_NUMBER
     # Before opening the browser, check if the episode has already been downloaded
     cursor.execute('''
         SELECT downloaded FROM episodes
@@ -149,7 +149,7 @@ def get_kwik_download_page(miruro_url):
         gather_episode_info(page, browser)
 
         # Create the appropriate directories if they dont exist
-        os.makedirs(os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {int(SEASON_NUMBER):02}"))
+        os.makedirs(os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {int(SEASON_NUMBER):02}"), exist_ok=True)
 
         # Now write .nfo files to ensure jellyfin has reliable metadata
         parse_metadata(page, browser, SERIES_ID, SERIES_TITLE)
