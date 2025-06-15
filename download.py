@@ -12,12 +12,23 @@ import sqlite3
 import portalocker
 import xml.etree.ElementTree as ET
 import warnings
+import unicodedata
 
 warnings.filterwarnings("ignore", message="The default datetime adapter is deprecated*", category=DeprecationWarning)
 
 # TODO: Add support for other streaming servers with download links if they are added to the site
 # TODO: Add a way to enable developer mode on first run by committing a seed chromium profile with only preferences
 # TODO: Add support for shows that havent begun airing
+# TODO: Add support for browser fingerprint spoofing
+# TODO: Fix errors showing when download script incorrectly tries to download episode that has not aired
+# TODO: Fix episodes getting overwritten for Part 2 of a season. (Either combine them into one episode or keep them separate)
+# TODO: Notify user which episodes failed to download and which succeeded
+# TODO: Find a way to ensure the 1080p version is downloaded
+# TODO: Move away from using global variables. Create objects that are passed to each function
+# TODO: Make it so that if the episode exists but not the nfo, it will attempt to create just the nfo file
+# TODO: Add "airs before" and "airs after" tags for seasons and/or episodes
+
+# TODO: Fix .nfo utf-8 encoding not supporting a middle dot
 
 # Load jellyfin API key from .env file
 load_dotenv()
@@ -62,6 +73,8 @@ def get_kwik_download_page(miruro_url):
         WHERE miruro_id = ? AND episode = ? AND downloaded = 1
     ''', (SERIES_ID, EPISODE_NUMBER))
     row = cursor.fetchone()
+
+    # If episode exists in the database and is indicated as downloaded, check if the file really exists
     if row and row[0]:
         cursor.execute('''
             SELECT title, season FROM series WHERE miruro_id = ?
@@ -70,17 +83,22 @@ def get_kwik_download_page(miruro_url):
         if series_row:
             SERIES_TITLE, SEASON_NUMBER = series_row
         OUTPUT_NAME = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER:02}", f"{SERIES_TITLE} S{SEASON_NUMBER:02}E{EPISODE_NUMBER:02}.mp4")
+
         print(f"[*] Checking if filename {OUTPUT_NAME} exists...")
         if os.path.exists(OUTPUT_NAME): # Need to query DB for series name etc.
             print(f"[!] Episode {EPISODE_NUMBER} of ID:{SERIES_ID} is already downloaded.")
+            # Check if .nfo exists for this episode and create one if it doesn't
             return "skip"
         print("[*] Database indicates episode is downloaded, but file does not exist. ")
+
+        # Update DB to say the episode was not downloaded
         cursor.execute('''
             UPDATE episodes
             SET downloaded = 0
             WHERE miruro_id = ? AND episode = ?
         ''', (SERIES_ID, EPISODE_NUMBER))
         conn.commit()
+
 
     with sync_playwright() as p:
         user_data_dir = os.path.abspath("chromium_user_data")
@@ -365,6 +383,13 @@ def create_nfo(anilist_json, mal_json):
     write_episode_nfo(anilist_json, mal_json, SERIES_TITLE)
     return
 
+def safe_unicode(text):
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    return unicodedata.normalize("NFC", text)
+
 def write_series_nfo(anilist_json, mal_json, SERIES_TITLE): # info, episodes (respectively)
     if anilist_json.get("coverImage", {}).get("extraLarge"):
         poster = anilist_json.get("coverImage", {}).get("extraLarge", "")
@@ -379,13 +404,13 @@ def write_series_nfo(anilist_json, mal_json, SERIES_TITLE): # info, episodes (re
     if int(SEASON_NUMBER) > 1: # Specific season. Write nfo as season specific
         season = ET.Element("season")
 
-        ET.SubElement(season, "title").text = anilist_json.get("title", {}).get("english", "")
-        ET.SubElement(season, "seasonnumber").text = str(int(SEASON_NUMBER))
-        ET.SubElement(season, "year").text = str(anilist_json.get("startDate", {}).get("year", ""))
-        ET.SubElement(season, "plot").text = anilist_json.get("description", "")
-        ET.SubElement(season, "rating").text = str(anilist_json.get("averageScore", ""))
-        ET.SubElement(season, "thumb", {"aspect": "poster"}).text = poster
-        # ET.SubElement(season, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
+        ET.SubElement(season, "title").text = safe_unicode(anilist_json.get("title", {}).get("english", ""))
+        ET.SubElement(season, "seasonnumber").text = safe_unicode(str(int(SEASON_NUMBER)))
+        ET.SubElement(season, "year").text = safe_unicode(str(anilist_json.get("startDate", {}).get("year", "")))
+        ET.SubElement(season, "plot").text = safe_unicode(anilist_json.get("description", ""))
+        ET.SubElement(season, "rating").text = safe_unicode(str(anilist_json.get("averageScore", "")))
+        ET.SubElement(season, "thumb", {"aspect": "poster"}).text = safe_unicode(poster)
+        # ET.SubElement(season, "thumb", {"aspect": "banner"}).text = safe_unicode(anilist_json.get("bannerImage", ""))
         tree = ET.ElementTree(season)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", "season.nfo")
         backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER}", f"backdrop.jpg")
@@ -394,12 +419,12 @@ def write_series_nfo(anilist_json, mal_json, SERIES_TITLE): # info, episodes (re
     else: # No season indicator, defaulting to show overview
         tvshow = ET.Element("tvshow")
 
-        ET.SubElement(tvshow, "title").text = anilist_json.get("title", {}).get("english", "")
-        ET.SubElement(tvshow, "year").text = str(anilist_json.get("startDate", {}).get("year", ""))
-        ET.SubElement(tvshow, "plot").text = anilist_json.get("description", "")
-        ET.SubElement(tvshow, "rating").text = str(anilist_json.get("averageScore", ""))
-        ET.SubElement(tvshow, "thumb", {"aspect": "poster"}).text = poster
-        # ET.SubElement(tvshow, "thumb", {"aspect": "banner"}).text = anilist_json.get("bannerImage", "")
+        ET.SubElement(tvshow, "title").text = safe_unicode(anilist_json.get("title", {}).get("english", ""))
+        ET.SubElement(tvshow, "year").text = safe_unicode(str(anilist_json.get("startDate", {}).get("year", "")))
+        ET.SubElement(tvshow, "plot").text = safe_unicode(anilist_json.get("description", ""))
+        ET.SubElement(tvshow, "rating").text = safe_unicode(str(anilist_json.get("averageScore", "")))
+        ET.SubElement(tvshow, "thumb", {"aspect": "poster"}).text = safe_unicode(poster)
+        # ET.SubElement(tvshow, "thumb", {"aspect": "banner"}).text = safe_unicode(anilist_json.get("bannerImage", ""))
         tree = ET.ElementTree(tvshow)
         path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "tvshow.nfo")
         backdrop_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, "backdrop.jpg")
@@ -440,12 +465,12 @@ def write_episode_nfo(anilist_json, mal_json, SERIES_TITLE):
     
     nfo_path = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER:02}", f"{SERIES_TITLE} S{SEASON_NUMBER:02}E{EPISODE_NUMBER:02}.nfo")
     episode_xml = ET.Element("episodedetails") 
-    ET.SubElement(episode_xml, "title").text = episode_obj.get("title", "")
-    ET.SubElement(episode_xml, "season").text = str(int(SEASON_NUMBER))
-    ET.SubElement(episode_xml, "episode").text = str(int(EPISODE_NUMBER))
-    ET.SubElement(episode_xml, "aired").text = episode_obj.get("airDate", "")
-    ET.SubElement(episode_xml, "plot").text = episode_obj.get("description", "")
-    ET.SubElement(episode_xml, "thumb", {"aspect": "poster"}).text = episode_obj.get("image", "")
+    ET.SubElement(episode_xml, "title").text = safe_unicode(episode_obj.get("title", ""))
+    ET.SubElement(episode_xml, "season").text = safe_unicode(str(int(SEASON_NUMBER)))
+    ET.SubElement(episode_xml, "episode").text = safe_unicode(str(int(EPISODE_NUMBER)))
+    ET.SubElement(episode_xml, "aired").text = safe_unicode(episode_obj.get("airDate", ""))
+    ET.SubElement(episode_xml, "plot").text = safe_unicode(episode_obj.get("description", ""))
+    ET.SubElement(episode_xml, "thumb", {"aspect": "poster"}).text = safe_unicode(episode_obj.get("image", ""))
 
     tree = ET.ElementTree(episode_xml)
     tree.write(nfo_path, encoding="utf-8", xml_declaration=True)
