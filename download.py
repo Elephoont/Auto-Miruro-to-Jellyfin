@@ -27,6 +27,7 @@ warnings.filterwarnings("ignore", message="The default datetime adapter is depre
 # TODO: Move away from using global variables. Create objects that are passed to each function
 # TODO: Make it so that if the episode exists but not the nfo, it will attempt to create just the nfo file
 # TODO: Add "airs before" and "airs after" tags for seasons and/or episodes
+# TODO: Ignore Miruro completely and skip the pahe.win countdown
 
 # TODO: Fix .nfo utf-8 encoding not supporting a middle dot
 
@@ -39,24 +40,109 @@ UBLOCK_PATH = os.path.abspath("./uBlock0.chromium")
 
 # Output directory for downloaded video
 OUTPUT_DIR = os.path.abspath("./output") # Default if not set in config
-OUTPUT_NAME = "episode.mp4"
+config = None
+MAX_RETRIES = 3
+MAX_EPISODES = 25  # Maximum episodes to download in one run
+CONFIG_PATH = "config.json"
+LOCK_FILE = "download.lock"
+
+OUTPUT_NAME = "episode.mp4" X
 SERIES_TITLE = "Unknown Series"
 SERIES_ID = None
 SEASON_NUMBER = 1
 EPISODE_NUMBER = 0
 EPISODE_NAME = "Unknown Episode"
 FOLLOW = False  # Whether to follow the series and download new episodes as they release
-MAX_RETRIES = 3
-MAX_EPISODES = 25  # Maximum episodes to download in one run
+conn = None
+cursor = None
 DUB = False  # Default to subbed unless specified
 EPISODES_IN_SEASON = 0 # Number of episodes in the selected season for range validation
 EPISODES_AIRED = 0
 AIRING = False
-CONFIG_PATH = "config.json"
-config = {}
-conn = None
-cursor = None
-LOCK_FILE = "download.lock"
+
+class Config():
+    def __init__(self, config_path):
+        self.config_json = self.load_config(config_path)
+        self.max_episodes = int(self.config_json.get("maxEpisodes", 30))
+        self.output_dir = os.path.abspath(self.config_json.get("outputDir", "./output"))
+        self.ban_NSFW = bool(self.config_json.get("banNSFW", True))
+        self.retry_delay = int(self.config_json.get("retryDelay", 5))
+        self.max_retries = int(self.config_json.get("maxRetries", 3))
+
+    def load_config(path=CONFIG_PATH):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Config file not found at {path}")
+        with open(path, "r") as file:
+            return json.load(file)
+
+class Show_Info():
+    def __init__(self, miruro_url: str, follow: bool):
+        self.miruro_url = miruro_url
+        self.miruro_id = self.parse_miruro_url(self, miruro_url)
+        self.follow = follow
+        self.output_name = None
+        self.season_number = 1  # Default value
+        self.episode_number = 0 # Default value
+        self.formatted_season_number = f"{self.season_number:02}"
+        self.formatted_episode_number = f"{self.episode_number:02}"
+        self.episode_range = None
+        self.episode_name = None
+        self.series_name = None
+
+        self.dub = False        # Default value
+        self.episodes_in_season = None
+        self.episodes_aired = None
+        self.airing = False     # Default value
+
+    def parse_miruro_url(self, miruro_url):
+        series_id = re.search(r'id=(\d+)', miruro_url)
+        if series_id:
+            self.miruro_id = series_id.group(1)
+            print(f"[*] Series ID: {self.miruro_id}")
+        else:
+            print("[!] Could not determine series ID from URL. Please ensure the URL is correct and contains a valid series ID.")
+            sys.exit(1)
+
+    def confirm_episodes(self, args):
+        if args.episode:                                # If there is a single episode number
+            self.episode_number = args.episode
+            self.episode_range = (EPISODE_NUMBER, EPISODE_NUMBER)
+
+        elif args.episodes and '-' in args.episodes:    # If there is a range of episodes to parse
+            ep_range = args.episodes.split('-')
+            if len(ep_range) != 2 or not all(x.isdigit() for x in ep_range):
+                raise ValueError("Invalid episode range format. Use 'start-end' (e.g. 1-5).")   
+            if ep_range[0] <= 0 or ep_range[1] <= 0:
+                raise ValueError("Episode numbers must be positive integers.")
+            if ep_range[0] > ep_range[1]:
+                raise ValueError("Start episode must be less than or equal to end episode.")
+            if ep_range[1] - ep_range[0] + 1 > config.max_episodes:
+                raise ValueError(f"Cannot download more than {config.max_episodes} episodes at once.")
+            self.episode_range = (int(ep_range[0]), int(ep_range[1]))
+        else:
+            # Ensure the URL contains &ep=NUM at the end
+            if self.miruro_url.rsplit("&ep=", 1)[-1].isdigit():
+                ep_number = int(re.sub("[^0-9]", "", args.url[-4:]))
+                if ep_number <= 0:
+                    raise ValueError("Could not determine episode number from URL. "
+                                    "Please specify with --episode or --episodes.")
+                self.episode_range = (ep_number, ep_number)
+                self.episode_number = ep_number
+            else:
+                raise ValueError("No episode number found in URL. "
+                                "Please specify with --episode or --episodes.")
+
+class Episode_Info(Show_Info):
+    def __init__(self, show_info: Show_Info, episode_number: int):
+        super().__init__(show_info.miruro_url, show_info.follow)
+        self.episode_number = episode_number
+        self.episode_name = None
+        self.season_number = None
+        self.series_name = None
+        self.pahewin_url= None
+        self.kwiksi_url = None
+        self.conn = None
+        self.cursor = None
 
 def acquire_download_lock():
     lock_file = open(LOCK_FILE, "w")
@@ -65,7 +151,7 @@ def acquire_download_lock():
     print("[OK] Lock acquired.")
     return lock_file
 
-def get_kwik_download_page(miruro_url):
+def get_kwik_download_page_OLD(miruro_url):
     global SERIES_TITLE, SEASON_NUMBER
     # Before opening the browser, check if the episode has already been downloaded
     cursor.execute('''
@@ -212,6 +298,40 @@ def get_kwik_download_page(miruro_url):
 
         browser.close()
         raise Exception("Timed out waiting for redirect button.")
+
+def get_kwik_download_page(show_info: Show_Info, episode_info: Episode_Info, config: Config):
+    # Before opening the browser, check if the episode has already been downloaded
+    cursor.execute('''
+        SELECT downloaded FROM episodes
+        WHERE miruro_id = ? AND episode = ? AND downloaded = 1
+    ''', (show_info.miruro_id, show_info.episode_number))
+    row = cursor.fetchone()
+
+    # If episode exists in the database and is indicated as downloaded, check if the file really exists
+    if row and row[0]:
+        cursor.execute('''
+            SELECT title, season FROM series WHERE miruro_id = ?
+        ''', (SERIES_ID,))
+        series_row = cursor.fetchone()
+        if series_row:
+            SERIES_TITLE, SEASON_NUMBER = series_row
+        OUTPUT_NAME = os.path.join(OUTPUT_DIR, SERIES_TITLE, f"Season {SEASON_NUMBER:02}", f"{SERIES_TITLE} S{SEASON_NUMBER:02}E{EPISODE_NUMBER:02}.mp4")
+
+        print(f"[*] Checking if filename {OUTPUT_NAME} exists...")
+        if os.path.exists(OUTPUT_NAME): # Need to query DB for series name etc.
+            print(f"[!] Episode {EPISODE_NUMBER} of ID:{SERIES_ID} is already downloaded.")
+            # Check if .nfo exists for this episode and create one if it doesn't
+            return "skip"
+        print("[*] Database indicates episode is downloaded, but file does not exist. ")
+
+        # Update DB to say the episode was not downloaded
+        cursor.execute('''
+            UPDATE episodes
+            SET downloaded = 0
+            WHERE miruro_id = ? AND episode = ?
+        ''', (SERIES_ID, EPISODE_NUMBER))
+        conn.commit()
+    
 
 def gather_episode_info(page, browser):
     global SERIES_TITLE, EPISODE_NAME, SEASON_NUMBER, EPISODE_NUMBER, OUTPUT_NAME, EPISODES_IN_SEASON, EPISODES_AIRED, AIRING
@@ -640,6 +760,9 @@ def get_kwik_download_link(kwik_f_url):
         conn.commit()
 
 def create_tables():
+    conn = sqlite3.connect("hue.db")
+    cursor = conn.cursor()
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS series (
             miruro_id TEXT PRIMARY KEY,
@@ -672,6 +795,9 @@ def create_tables():
             PRIMARY KEY (miruro_id, season, episode)
         )
     ''')
+
+    conn.commit()
+    conn.close()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -710,12 +836,6 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-def load_config(path=CONFIG_PATH):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Config file not found at {path}")
-    with open(path, "r") as file:
-        return json.load(file)
-
 def trigger_jellyfin_scan():
     url = "http://localhost:8096/Library/Refresh"
     headers = {
@@ -730,73 +850,40 @@ def trigger_jellyfin_scan():
 def main() -> None:
     lock_file = acquire_download_lock()
     try:
-        global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB, FOLLOW, SERIES_ID, conn, cursor
-        config = load_config()
-        MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
+        # global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB, FOLLOW, SERIES_ID, conn, cursor
+        config = Config(CONFIG_PATH)
+        #MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
 
-        conn = sqlite3.connect("hue.db")
-        cursor = conn.cursor()
+        # Create the DB tables if they don't exist yet
         create_tables()
 
+        # Parse the command line args
         args = parse_args()
-        Miruro_URL = args.url    
-        DUB = args.dub
-        
-        OUTPUT_DIR = os.path.abspath(config.get("outputDir", OUTPUT_DIR))
 
-        if args.episode:
-            EPISODE_NUMBER = args.episode
-            EPISODE_RANGE = (EPISODE_NUMBER, EPISODE_NUMBER)
-        elif args.episodes and '-' in args.episodes:
-            EPISODE_RANGE = args.episodes.split('-')
-            if len(EPISODE_RANGE) != 2 or not all(x.isdigit() for x in EPISODE_RANGE):
-                raise ValueError("Invalid episode range format. Use 'start-end' (e.g. 1-5).")
-            EPISODE_RANGE = (int(EPISODE_RANGE[0]), int(EPISODE_RANGE[1]))
-            if EPISODE_RANGE[0] <= 0 or EPISODE_RANGE[1] <= 0:
-                raise ValueError("Episode numbers must be positive integers.")
-            if EPISODE_RANGE[0] > EPISODE_RANGE[1]:
-                raise ValueError("Start episode must be less than or equal to end episode.")
-            if EPISODE_RANGE[1] - EPISODE_RANGE[0] + 1 > MAX_EPISODES:
-                raise ValueError(f"Cannot download more than {MAX_EPISODES} episodes at once.")
-        else:
-            # Ensure the URL contains &ep=NUM at the end
-            if Miruro_URL.rsplit("&ep=", 1)[-1].isdigit():
-                EPISODE_NUMBER = int(re.sub("[^0-9]", "", args.url[-4:]))
-                if EPISODE_NUMBER <= 0:
-                    raise ValueError("Could not determine episode number from URL. "
-                                    "Please specify with --episode or --episodes.")
-                EPISODE_RANGE = (EPISODE_NUMBER, EPISODE_NUMBER)
-            else:
-                raise ValueError("No episode number found in URL. "
-                                "Please specify with --episode or --episodes.")
-        
-        SERIES_ID = re.search(r'id=(\d+)', Miruro_URL)
-        if SERIES_ID:
-            SERIES_ID = SERIES_ID.group(1)
-            print(f"[*] Series ID: {SERIES_ID}")
-        else:
-            print("[!] Could not determine series ID from URL. "
-                "Please ensure the URL is correct and contains a valid series ID.")
-            conn.close()
-            sys.exit(1)
+        # Create an instance of the Show_Info class
+        show_info = Show_Info(args.url, args.follow)
 
-        if args.follow:
-            FOLLOW = True
-            print("[*] Following the series for new episodes...")
-        
-        print(f"[*] Downloading episodes {EPISODE_RANGE[0]} to {EPISODE_RANGE[1]}")
+        show_info.dub = args.dub
 
-        for episode in range(EPISODE_RANGE[0], EPISODE_RANGE[1]+1):
-            for i in range(MAX_RETRIES):
+        # Assign the correct values based on the link and args to .episode_number and .episode_range
+        show_info.confirm_episodes(args)  
+        
+        print(f"[*] Downloading episodes {show_info.episode_range[0]} to {show_info.episode_range[1]}")
+
+        for episode in range(show_info.episode_range[0], show_info.episode_range[1]+1):
+            for i in range(config.max_retries):
                 try:
-                    EPISODE_NUMBER = episode
-                    Miruro_URL =  Miruro_URL.rsplit("&ep=", 1)[0]
-                    Miruro_URL = f"{Miruro_URL}&ep={episode}"
-                    print(f"Miruro URL: {Miruro_URL}")
+                    show_info.episode_number = episode
+                    show_info.formatted_episode_number = f"{episode:02}"
+                    show_info.miruro_url =  show_info.miruro_url.rsplit("&ep=", 1)[0]
+                    show_info.miruro_url = f"{show_info.miruro_url}&ep={episode}"
+
+                    episode_info = Episode_Info(show_info, episode)
+                    print(f"Miruro URL: {show_info.miruro_url}")
                     print(f"Downloading episode {episode}")
-                    kwik_f_url = get_kwik_download_page(Miruro_URL)
-                    get_kwik_download_link(kwik_f_url)
-                    saved = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
+                    episode_info = get_kwik_download_page(show_info, episode_info, config)
+                    get_kwik_download_link(episode_info, show_info)
+                    saved = os.path.join(config.output_dir, show_info.output_name)
                     print(f"\n[OK] Done! File saved to: {saved}\n")
                     break  # Exit retry loop on success
                 except KeyboardInterrupt:
