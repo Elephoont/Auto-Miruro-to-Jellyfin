@@ -138,6 +138,7 @@ class Episode_Info():
     def __init__(self, show_info: Show_Info, episode_number: int):
         self.show_info = show_info
         self.episode_number = episode_number
+        self.formatted_episode_number = f"{episode_number:02}"
         self.episode_name = None
         self.pahewin_url= None
         self.kwiksi_url = None
@@ -172,6 +173,7 @@ class Episode_Info():
                 print(f"[!] Episode {self.episode_number} of ID:{self.show_info.miruro_id} is already downloaded.")
                 # Check if .nfo exists for this episode and create one if it doesn't
                 conn.close()
+                self.downloaded = True
                 return True
             print("[*] Database indicates episode is downloaded, but file does not exist. ")
 
@@ -182,8 +184,11 @@ class Episode_Info():
                 WHERE miruro_id = ? AND episode = ?
             ''', (self.show_info.miruro_id, self.episode_number))
             conn.commit()
+            conn.close()
+            self.downloaded = False
             return False
         conn.close()
+        self.downloaded = False
         return False
 
 def acquire_download_lock():
@@ -341,39 +346,41 @@ def get_kwik_download_page_OLD(miruro_url):
         browser.close()
         raise Exception("Timed out waiting for redirect button.")
 
-def get_kwik_download_page(episode: Episode_Info, config: Config):
+def get_kwik_download_page(episode: Episode_Info):
     if episode.episode_downloaded():
         return "skip"
     
-    anilist_json_link = f"https://www.miruro.to/api/info/anilist/{episode.show_info.miruro_id}"
+    show_info = episode.show_info
+    
+    anilist_json_link = f"https://www.miruro.to/api/info/anilist/{show_info.miruro_id}"
     # MAL ID is found in key "idMal"
 
     # Fetch the anilist json from the link
     anilist_json = request_json(anilist_json_link)
 
-    episode.show_info.mal_id = anilist_json.get("idMal", None)
+    show_info.mal_id = anilist_json.get("idMal", None)
 
     status = anilist_json.get("status", None)
 
     if status == "AIRING":
-        episode.show_info.airing = True
+        show_info.airing = True
     else:
-        episode.show_info.airing = False
+        show_info.airing = False
 
-    mal_json_link = f"https://www.miruro.to/api/episodes?malId={episode.show_info.mal_id}&ongoing={str(episode.show_info.airing).lower()}"
+    mal_json_link = f"https://www.miruro.to/api/episodes?malId={show_info.mal_id}&ongoing={str(show_info.airing).lower()}"
 
     # Fetch the mal json from the link
     mal_json = request_json(mal_json_link)
 
     # Gather info about the episode/series
-    gather_episode_info(anilist_json, mal_json)
+    gather_episode_info(episode, anilist_json, mal_json)
 
     # Get Anime Pahe ID
     pahe_id, pahe_obj = next(iter(mal_json.get("ANIMEPAHE", "").items()))
-    episode.show_info.pahe_id = int(pahe_id)
+    show_info.pahe_id = int(pahe_id)
 
     # Can add fetchType=&category=sub to get sub or dub
-    pahe_json_link = f"https://www.miruro.to/api/sources?episodeId={episode.show_info.pahe_id}%2Fep-{episode.episode_number}&provider=animepahe"
+    pahe_json_link = f"https://www.miruro.to/api/sources?episodeId={show_info.pahe_id}%2Fep-{episode.episode_number}&provider=animepahe"
     
     # Fetch the mal json from the link 
     pahe_json = request_json(pahe_json_link)
@@ -428,11 +435,21 @@ def request_json(link):
 
     return json.json()
 
-def gather_episode_info(anilist_json, mal_json):
+def gather_episode_info(episode: Episode_Info , anilist_json, mal_json):
     # Get the following data and save it to the DB:
     # Series Title, Episode Title, Season number, Episodes in the season, Episodes aired
     # Skip if tags include ECCHI or HENTAI
+    # Find next episode airing time if it is airing
+    show_info = episode.show_info
 
+    # Find the series title from the anilist json
+    show_info.series_name = anilist_json.get("title", {}).get("english", None)
+
+    # Remove characters not allowed in Windows file system
+    show_info.series_name = re.sub(r'[<>:"/\\|?*]', '', show_info.series_name)
+
+    if show_info.dub:
+        show_info.series_name += " (Dubbed)"
 
     return
 
@@ -732,6 +749,8 @@ def get_kwik_download_link(episode: Episode_Info):
     from playwright.sync_api import sync_playwright
     import os
 
+    show_info = episode.show_info
+
     kwik_f_url = episode.kwiksi_url
 
     print("[*] Opening kwik.si page with Playwright...")
@@ -797,9 +816,9 @@ def get_kwik_download_link(episode: Episode_Info):
         # Step 5: Submit form inside browser session to capture download
         print("[*] Submitting form via Playwright to get the real file...")
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(config.max_retries):
             try:
-                print(f"[*] Form submission attempt {attempt+1}/{MAX_RETRIES}")
+                print(f"[*] Form submission attempt {attempt+1}/{config.max_retries}")
 
                 with page.expect_download(timeout=10000) as download_info:
                     page.evaluate(f'''
@@ -819,8 +838,8 @@ def get_kwik_download_link(episode: Episode_Info):
                     download = download_info.value
 
                 # Save the downloaded file
-                os.makedirs(OUTPUT_DIR, exist_ok=True)
-                output_path = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
+                os.makedirs(config.output_dir, exist_ok=True)
+                output_path = os.path.join(config.output_dir, episode.output_name)
                 download.save_as(output_path)
 
                 print(f"[OK] Download complete: {output_path}")
@@ -829,7 +848,7 @@ def get_kwik_download_link(episode: Episode_Info):
 
             except Exception as e:
                 print(f"[!] Form submission attempt {attempt + 1} failed: {e}")
-                if attempt < MAX_RETRIES - 1:
+                if attempt < config.max_retries - 1:
                     print("[*] Refreshing kwik.si page to retry...")
                     page.reload()
                     page.wait_for_timeout(3000)
@@ -839,7 +858,7 @@ def get_kwik_download_link(episode: Episode_Info):
                     raise
 
         airing = 1  # Default to airing
-        if int(EPISODES_AIRED) == int(EPISODES_IN_SEASON) or int(EPISODE_NUMBER) == int(EPISODES_IN_SEASON):
+        if int(show_info.episodes_aired) == int(show_info.episodes_in_season) or int(episode.episode_number) == int(show_info.episodes_in_season):
             print("[*] This is the last episode of the season. Marking as not airing in the database.")
             airing = 0
 
@@ -847,14 +866,14 @@ def get_kwik_download_link(episode: Episode_Info):
             UPDATE episodes
             SET downloaded = 1
             WHERE miruro_id = ? AND season = ? AND episode = ?
-        ''', (SERIES_ID, SEASON_NUMBER, EPISODE_NUMBER))
+        ''', (show_info.miruro_id, show_info.season_number, episode.episode_number))
         cursor.execute('''
             UPDATE series
             SET last_checked = CURRENT_TIMESTAMP,
                 download_failed = 0,
                 is_airing = ?
             WHERE miruro_id = ?
-        ''', (airing, SERIES_ID))
+        ''', (airing, show_info.miruro_id))
         conn.commit()
 
 def create_tables():
@@ -951,7 +970,6 @@ def main() -> None:
         # global config, OUTPUT_DIR, EPISODE_NUMBER, MAX_EPISODES, DUB, FOLLOW, SERIES_ID, conn, cursor
         global config
         config = Config(CONFIG_PATH)
-        #MAX_EPISODES = config.get("maxEpisodes", MAX_EPISODES)
 
         # Create the DB tables if they don't exist yet
         create_tables()
@@ -962,6 +980,7 @@ def main() -> None:
         # Create an instance of the Show_Info class
         show_info = Show_Info(args.url, args.follow)
 
+        show_info.config = config
         show_info.dub = args.dub
 
         # Assign the correct values based on the link and args to .episode_number and .episode_range
@@ -980,7 +999,7 @@ def main() -> None:
                     episode_info = Episode_Info(show_info, episode)
                     print(f"Miruro URL: {show_info.miruro_url}")
                     print(f"Downloading episode {episode}")
-                    downloadable = get_kwik_download_page(episode_info, config)
+                    downloadable = get_kwik_download_page(episode_info)
                     if downloadable == "skip": break
                     if not downloadable: continue
                     get_kwik_download_link(episode_info)
