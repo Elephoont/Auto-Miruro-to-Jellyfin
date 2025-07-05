@@ -87,6 +87,7 @@ class Show_Info():
         self.episode_range = None
         self.episode_name = None
         self.series_name = None
+        self.windows_safe_series_name = None
         self.config = config
         self.mal_id = None
         self.pahe_id = None
@@ -440,16 +441,78 @@ def gather_episode_info(episode: Episode_Info , anilist_json, mal_json):
     # Series Title, Episode Title, Season number, Episodes in the season, Episodes aired
     # Skip if tags include ECCHI or HENTAI
     # Find next episode airing time if it is airing
+
+    pahe_id, pahe_json = next(iter(mal_json.get("ANIMEPAHE", "").items()))
+    pahe_id = int(pahe_id)
+
+    TMDB_id, TMDB_json = next(iter(mal_json.get("TMDB", "").items()))
+    TMDB_id = int(TMDB_id)
+    tmdb_episodes_arr = TMDB_json.get("metadata", {}).get("episodes", [])
+
     show_info = episode.show_info
 
     # Find the series title from the anilist json
     show_info.series_name = anilist_json.get("title", {}).get("english", None)
 
     # Remove characters not allowed in Windows file system
-    show_info.series_name = re.sub(r'[<>:"/\\|?*]', '', show_info.series_name)
+    show_info.windows_safe_series_name = re.sub(r'[<>:"/\\|?*]', '', show_info.series_name)
+
+    # Skip the download if the series tags are blacklisted
+    if config.get("banNSFW", True):
+        tags_arr = pahe_json.get("genre", "").split(", ")
+        blacklist = {"ECCHI", "HENTAI"}
+        whitelist_titles = {
+            "nogamenolife",
+            "konosuba", 
+            "mushokutensei", 
+            "killlakill", 
+            "mydress-updarling", 
+            "weneverlearn"
+        }
+        normalized_title = show_info.series_name.lower().replace(" ", "")
+        is_whitelisted = any(kw in normalized_title for kw in whitelist_titles)
+
+        if tags_arr and not is_whitelisted:
+            tags = {tag.strip().upper() for tag in tags_arr}
+            print(f"[*] Tags found: {tags}")
+
+            if blacklist & tags:
+                print("[X] Blacklisted tag detected. Skipping this series.")
+                sys.exit(69)
 
     if show_info.dub:
         show_info.series_name += " (Dubbed)"
+
+    # Get the number of episodes in the season
+    show_info.episodes_in_season = pahe_json.get("totalEpisodes", None)
+
+    # Get the number of episodes aired
+    first_episode_number = int(pahe_json.get("episodeList", [])[0].get("number", 0))
+    show_info.episodes_aired = pahe_json.get("currentEpisode", 0) - (first_episode_number - 1)
+
+    # Get the requested download episode number that corresponds to the pahe json
+    pahe_episode_number = (first_episode_number - 1) + episode.episode_number
+
+    # Find the episode number the MAL JSON labels it as
+    mal_first_episode_number = int(tmdb_episodes_arr[0].get("number", 0))
+
+    if mal_first_episode_number <= 0: # This only occurs if mal_last_episode_number ends up being 0
+        mal_first_episode_number = 1
+
+    mal_episode_number = mal_first_episode_number + int(EPISODE_NUMBER) - 1
+
+    # Find the corresponding episode in the tmdb episodes array
+    tmdb_episode_obj = None
+    for ep in tmdb_episodes_arr:
+        if ep.get("number", "") == mal_episode_number:
+            tmdb_episode_obj = ep
+            break
+
+    # If the episode object was not found, raise an error
+    # TODO
+
+    # Get the episode name from the tmdb episode object
+    episode.episode_name = tmdb_episode_obj.get("title", f"Episode {episode.episode_number}")
 
     return
 
