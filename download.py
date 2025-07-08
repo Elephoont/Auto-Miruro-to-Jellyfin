@@ -82,15 +82,20 @@ class Show_Info():
         self.follow = follow
         self.season_number = 1  # Default value
         self.episode_number = 0 # Default value
+        self.concatenated_season = False # Default value
         self.formatted_season_number = f"{self.season_number:02}"
         self.formatted_episode_number = f"{self.episode_number:02}"
         self.episode_range = None
         self.episode_name = None
         self.series_name = None
+        self.shortened_series_name = None
         self.windows_safe_series_name = None
         self.config = config
         self.mal_id = None
         self.pahe_id = None
+        self.next_episode_date = None
+        self.next_episode_number = None
+        self.separate_seasons = False
 
         self.dub = False        # Default value
         self.episodes_in_season = None
@@ -139,6 +144,7 @@ class Episode_Info():
     def __init__(self, show_info: Show_Info, episode_number: int):
         self.show_info = show_info
         self.episode_number = episode_number
+        self.mal_episode_number = None
         self.formatted_episode_number = f"{episode_number:02}"
         self.episode_name = None
         self.pahewin_url= None
@@ -444,6 +450,7 @@ def gather_episode_info(episode: Episode_Info , anilist_json, mal_json):
 
     pahe_id, pahe_json = next(iter(mal_json.get("ANIMEPAHE", "").items()))
     pahe_id = int(pahe_id)
+    # If this is not present, raise an error. Undownloadable episode
 
     TMDB_id, TMDB_json = next(iter(mal_json.get("TMDB", "").items()))
     TMDB_id = int(TMDB_id)
@@ -453,6 +460,9 @@ def gather_episode_info(episode: Episode_Info , anilist_json, mal_json):
 
     # Find the series title from the anilist json
     show_info.series_name = anilist_json.get("title", {}).get("english", None)
+
+    # Find the series title without season or part number in it
+    show_info.shortened_series_name = TMDB_json.get("metadata", {}).get("tvShowDetails", {}).get("show", {}).get("name", None)
 
     # Remove characters not allowed in Windows file system
     show_info.windows_safe_series_name = re.sub(r'[<>:"/\\|?*]', '', show_info.series_name)
@@ -479,6 +489,10 @@ def gather_episode_info(episode: Episode_Info , anilist_json, mal_json):
             if blacklist & tags:
                 print("[X] Blacklisted tag detected. Skipping this series.")
                 sys.exit(69)
+
+    if anilist_json.get("averageScore", 100) < 60: # Don't download trash shows
+        print("[X] Series has an absurdly low score. Not downloading.")
+        sys.exit(70)
 
     if show_info.dub:
         show_info.series_name += " (Dubbed)"
@@ -513,6 +527,62 @@ def gather_episode_info(episode: Episode_Info , anilist_json, mal_json):
 
     # Get the episode name from the tmdb episode object
     episode.episode_name = tmdb_episode_obj.get("title", f"Episode {episode.episode_number}")
+
+    # Determine if the season is concatenated with the one before it (Doesn't mean MAL is wrong quite yet)
+    seasons_concatenated = False
+    if mal_first_episode_number != 1:
+        seasons_concatenated = True
+        episode.mal_episode_number = mal_episode_number
+
+    # If there is a season number in the series name, that should be used
+    season_match = re.search(r'Season\s+(\d+)', show_info.series_name, re.IGNORECASE)
+    if season_match:
+        show_info.season_number = int(season_match.group(1))
+    else:
+        return
+    
+    # Get the season number MAL indicates this episode belongs to
+    mal_indicated_season_number = TMDB_json.get("metadata", {}).get("tvShowDetails", {}).get("selectedSeason", {}).get("season_number", None)
+
+    # If there is a season number in the title, but that doesn't match what MAL says, treat this season as a completely separate show to avoid overwriting
+    if mal_indicated_season_number is not None and mal_indicated_season_number != show_info.season_number:
+        # This is the only scenario where the mal json season number should not be used
+        # Check if there is a part or cour number in the title. If not, write to the season number the title with the given episode number
+        if re.search(r'Part\s+\d+', show_info.series_name, re.IGNORECASE) or re.search(r'Cour\s+\d+', show_info.series_name, re.IGNORECASE):
+            show_info.separate_seasons = True
+    else:
+        show_info.season_number = mal_indicated_season_number
+        
+    # Determine if the series is currently airing
+    if anilist_json.get("status", "").lower() == "releasing":
+        show_info.airing = True
+    else:
+        show_info.airing = False
+
+    # If if is airing, find the next episode airing time
+    if show_info.airing:
+        airing_time = anilist_json.get("nextAiringEpisode", {}).get("airingAt", None) # This is in seconds from epoch
+        # Convert the airing time to a datetime object
+        if airing_time:
+            airing_time = datetime.fromtimestamp(airing_time)
+            show_info.next_airing_time = airing_time
+        else:
+            # If no airing time is found, set it to tomorrow
+            show_info.next_airing_time = datetime.now() + timedelta(days=1)
+
+        # Get the next episode number
+        show_info.next_episode_number = anilist_json.get("nextAiringEpisode", {}).get("episode", None)
+
+    # Update the database to track episodes
+    cursor.execute('''
+            INSERT OR REPLACE INTO episodes (miruro_id, season, episode, title, downloaded)
+            VALUES (?, ?, ?, ?, 0)
+        ''', (show_info.miruro_id, int(show_info.season_number), int(episode.episode_number), episode.episode_name))
+    cursor.execute('''
+        INSERT OR REPLACE INTO series (miruro_id, title, season, episode_count, episodes_aired, next_episode_time, next_episode, is_airing, last_checked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (show_info.miruro_id, show_info.series_name, int(show_info.season_number), show_info.episodes_in_season, show_info.episodes_aired, show_info.next_episode_date, show_info.next_episode_number, show_info.airing))
+    conn.commit()
 
     return
 
@@ -682,9 +752,8 @@ def parse_metadata(page, browser, miruro_id, SERIES_TITLE):
         print(f"[X] Error fetching metadata: {e}")
 
 def create_nfo(anilist_json, mal_json):
-    write_series_nfo(anilist_json, mal_json, SERIES_TITLE)
+    write_series_nfo(anilist_json, mal_json, SERIES_TITLE) # This needs to be changed so it uses the title from the anilist json
     write_episode_nfo(anilist_json, mal_json, SERIES_TITLE)
-    return
 
 def safe_unicode(text):
     if text is None:
